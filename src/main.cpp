@@ -9,15 +9,18 @@
 #include <irods/rodsErrorTable.h>
 #include <irods/filesystem.hpp>
 #include <irods/irods_logger.hpp>
+#include <irods/irods_query.hpp>
 
 #include "json.hpp"
 
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <array>
 #include <algorithm>
 #include <iterator>
 #include <functional>
+#include <optional>
 
 namespace
 {
@@ -72,6 +75,64 @@ namespace
         {
             return boost::any_cast<T*>(*std::next(std::begin(rule_arguments), 2));
         }
+
+        auto get_uuid(rsComm_t& conn, const fs::path& p) -> std::optional<std::string>
+        {
+            const auto gql = fmt::format("select META_DATA_ATTR_VALUE where COLL_NAME = '{}' and "
+                                         "DATA_NAME = '{}' and META_DATA_ATTR_NAME = 'irods::hard_link'",
+                                         p.parent_path().c_str(),
+                                         p.object_name().c_str());
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                return row[0];
+            }
+
+            return std::nullopt;
+        }
+
+        auto get_data_objects(rsComm_t& conn, std::string_view uuid) -> std::vector<fs::path>
+        {
+            const auto gql = fmt::format("select COLL_NAME, DATA_NAME where META_DATA_ATTR_NAME = 'irods::hard_link' and "
+                                         "META_DATA_ATTR_VALUE = '{}'",
+                                         uuid);
+
+            std::vector<fs::path> data_objects;
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                data_objects.push_back(fs::path{row[0]} / row[1]);
+            }
+
+            return data_objects;
+        }
+
+        auto get_sibling_data_objects(rsComm_t& conn, const fs::path& p) -> std::vector<fs::path>
+        {
+            const auto uuid = get_uuid(conn, p);
+
+            if (!uuid) {
+                return {};
+            }
+
+            auto data_objects = get_data_objects(conn, *uuid);
+            auto end = std::end(data_objects);
+
+            data_objects.erase(std::remove(std::begin(data_objects), end, p), end);
+
+            return data_objects;
+        }
+
+        auto get_physical_path(rsComm_t& conn, const fs::path& p) -> std::string
+        {
+            const auto gql = fmt::format("select DATA_PATH where COLL_NAME = '{}' and DATA_NAME = '{}'",
+                                         p.parent_path().c_str(),
+                                         p.object_name().c_str());
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                return row[0];
+            }
+
+            throw std::runtime_error{fmt::format("Could not retrieve physical path for [{}]", p.c_str())};
+        }
     } // namespace util
 
     //
@@ -90,6 +151,10 @@ namespace
                 try
                 {
                     auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
+                    auto& conn = *util::get_rei(effect_handler).rsComm;
+
+                    const auto physical_path = util::get_physical_path(conn, input->srcDataObjInp.objPath);
+                    const auto siblings = util::get_sibling_data_objects(conn, input->srcDataObjInp.objPath);
                 }
                 catch (const std::exception& e)
                 {
