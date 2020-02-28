@@ -4,12 +4,15 @@
 #include <irods/irods_re_ruleexistshelper.hpp>
 #include <irods/irods_get_l1desc.hpp>
 #include <irods/irods_at_scope_exit.hpp>
+#include <irods/modDataObjMeta.h>
+#include <irods/objInfo.h>
 #include <irods/rcMisc.h>
 #include <irods/rodsError.h>
 #include <irods/rodsErrorTable.h>
 #include <irods/filesystem.hpp>
 #include <irods/irods_logger.hpp>
 #include <irods/irods_query.hpp>
+#include <irods/rsModDataObjMeta.hpp>
 
 #include "json.hpp"
 
@@ -29,8 +32,6 @@ namespace
 
     using log              = irods::experimental::log;
     using json             = nlohmann::json;
-    using handler_type     = std::function<irods::error(std::list<boost::any>&, irods::callback&)>;
-    using handler_map_type = std::map<std::string_view, handler_type>;
     // clang-format on
 
     namespace util
@@ -133,6 +134,21 @@ namespace
 
             throw std::runtime_error{fmt::format("Could not retrieve physical path for [{}]", p.c_str())};
         }
+
+        auto set_physical_path(rsComm_t& conn, const fs::path& logical_path, const fs::path& physical_path) -> int
+        {
+            dataObjInfo_t info{};
+            rstrcpy(info.objPath, logical_path.c_str(), MAX_NAME_LEN);
+
+            keyValPair_t reg_params{};
+            addKeyVal(&reg_params, FILE_PATH_KW, physical_path.c_str());
+
+            modDataObjMeta_t input{};
+            input.dataObjInfo = &info;
+            input.regParam = &reg_params;
+
+            return rsModDataObjMeta(&conn, &input);
+        }
     } // namespace util
 
     //
@@ -146,15 +162,20 @@ namespace
         public:
             pep_api_data_obj_rename() = delete;
 
+            static auto reset() -> void
+            {
+                siblings_.clear();
+            }
+
             static auto pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
             {
+                reset();
+
                 try
                 {
                     auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
                     auto& conn = *util::get_rei(effect_handler).rsComm;
-
-                    const auto physical_path = util::get_physical_path(conn, input->srcDataObjInp.objPath);
-                    const auto siblings = util::get_sibling_data_objects(conn, input->srcDataObjInp.objPath);
+                    siblings_ = util::get_sibling_data_objects(conn, input->srcDataObjInp.objPath);
                 }
                 catch (const std::exception& e)
                 {
@@ -170,6 +191,16 @@ namespace
                 try
                 {
                     auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
+                    auto& conn = *util::get_rei(effect_handler).rsComm;
+                    const auto physical_path = util::get_physical_path(conn, input->destDataObjInp.objPath);
+
+                    for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
+                        // TODO Should we throw?
+                        //      Should this be an atomic operation?
+                        //      What should happen if one of many hard-links fails to be updated?
+                        const auto ec = util::set_physical_path(conn, sibling, physical_path);
+                        log::rule_engine::trace("rename post - setting physical path of data object [{}] to [{}] :::: ec = {}", sibling.c_str(), physical_path, ec);
+                    }
                 }
                 catch (const std::exception& e)
                 {
@@ -181,6 +212,7 @@ namespace
             }
 
         private:
+            inline static std::vector<fs::path> siblings_;
         }; // class pep_api_data_obj_rename
 
         class pep_api_data_obj_unlink final
@@ -226,11 +258,16 @@ namespace
     // Rule Engine Plugin
     //
 
+    // clang-format off
+    using handler_type     = std::function<irods::error(std::list<boost::any>&, irods::callback&)>;
+    using handler_map_type = std::map<std::string_view, handler_type>;
+    // clang-format on
+
     const handler_map_type pep_handlers{
-        {"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename::post},
-        {"pep_api_data_obj_rename_pre", handler::pep_api_data_obj_rename::pre},
-        {"pep_api_data_obj_unlink_post", handler::pep_api_data_obj_unlink::post},
-        {"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink::pre}
+        {"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename::post}
+        //{"pep_api_data_obj_rename_pre",  handler::pep_api_data_obj_rename::pre},
+        //{"pep_api_data_obj_unlink_post", handler::pep_api_data_obj_unlink::post},
+        //{"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink::pre}
     };
 
     const handler_map_type commands{
@@ -244,7 +281,7 @@ namespace
 
     auto rule_exists(irods::default_re_ctx&, const std::string& rule_name, bool& exists) -> irods::error
     {
-        exists = std::binary_search(std::begin(pep_handlers), std::end(pep_handlers), rule_name);
+        exists = pep_handlers.find(rule_name) != std::end(pep_handlers);
         return SUCCESS();
     }
 
