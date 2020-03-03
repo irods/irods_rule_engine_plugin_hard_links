@@ -4,6 +4,7 @@
 #include <irods/irods_re_ruleexistshelper.hpp>
 #include <irods/irods_get_l1desc.hpp>
 #include <irods/irods_at_scope_exit.hpp>
+#include <irods/irods_state_table.h>
 #include <irods/modDataObjMeta.h>
 #include <irods/objInfo.h>
 #include <irods/rcMisc.h>
@@ -13,6 +14,7 @@
 #include <irods/irods_logger.hpp>
 #include <irods/irods_query.hpp>
 #include <irods/rsModDataObjMeta.hpp>
+#include <irods/rsDataObjUnlink.hpp>
 
 #include "json.hpp"
 
@@ -28,10 +30,10 @@
 namespace
 {
     // clang-format off
-    namespace fs           = irods::experimental::filesystem;
+    namespace fs = irods::experimental::filesystem;
 
-    using log              = irods::experimental::log;
-    using json             = nlohmann::json;
+    using log    = irods::experimental::log;
+    using json   = nlohmann::json;
     // clang-format on
 
     namespace util
@@ -215,43 +217,48 @@ namespace
             inline static std::vector<fs::path> siblings_;
         }; // class pep_api_data_obj_rename
 
-        class pep_api_data_obj_unlink final
+        auto pep_api_data_obj_unlink_pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
-        public:
-            pep_api_data_obj_unlink() = delete;
-
-            static auto pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
+            try
             {
-                try
-                {
-                    auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
-                }
-                catch (const std::exception& e)
-                {
-                    util::log_exception_message(e.what(), effect_handler);
-                    return ERROR(RE_RUNTIME_ERROR, e.what());
+                auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
+                auto& conn = *util::get_rei(effect_handler).rsComm;
+
+                // Unregister the data object.
+                // Hard-links do NOT appear in the trash.
+                if (const auto uuid = util::get_uuid(conn, input->objPath); uuid && util::get_data_objects(conn, *uuid).size() > 1) {
+                    log::rule_engine::debug("unlink pre - removing hard-link [{}] ...", input->objPath);
+
+                    dataObjInp_t unreg_input{};
+                    unreg_input.oprType = UNREG_OPR;
+                    rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
+                    addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
+
+                    if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
+                        log::rule_engine::error("Could not unregister hard-link [{}]", input->objPath);
+                        return ERROR(ec, "Hard-Link update error");
+                    }
+
+                    log::rule_engine::debug("Successfully removed hard-link [{}]", input->objPath);
+
+                    return CODE(RULE_ENGINE_SKIP_OPERATION);
                 }
 
-                return CODE(RULE_ENGINE_CONTINUE);
+                log::rule_engine::debug("unlink pre - removing data object ...");
+            }
+            catch (const std::exception& e)
+            {
+                util::log_exception_message(e.what(), effect_handler);
+                return ERROR(RE_RUNTIME_ERROR, e.what());
             }
 
-            static auto post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
-            {
-                try
-                {
-                    auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
-                }
-                catch (const std::exception& e)
-                {
-                    util::log_exception_message(e.what(), effect_handler);
-                    return ERROR(RE_RUNTIME_ERROR, e.what());
-                }
+            return CODE(RULE_ENGINE_CONTINUE);
+        }
 
-                return CODE(RULE_ENGINE_CONTINUE);
-            }
-
-        private:
-        }; // class pep_api_data_obj_unlink
+        auto skip_operation(std::list<boost::any>&, irods::callback&) -> irods::error
+        {
+            return CODE(RULE_ENGINE_SKIP_OPERATION);
+        }
     } // namespace handler
 
     //
@@ -264,10 +271,16 @@ namespace
     // clang-format on
 
     const handler_map_type pep_handlers{
-        {"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename::post}
-        //{"pep_api_data_obj_rename_pre",  handler::pep_api_data_obj_rename::pre},
-        //{"pep_api_data_obj_unlink_post", handler::pep_api_data_obj_unlink::post},
-        //{"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink::pre}
+        {"pep_api_data_obj_rename_post",   handler::pep_api_data_obj_rename::post},
+        {"pep_api_data_obj_unlink_pre",    handler::pep_api_data_obj_unlink_pre},
+        // TODO Need to handle trim operations.
+        //{"pep_api_data_obj_trim_pre",        handler::skip_operation},
+
+        // TODO These are no longer needed with the latest changes to the REPF.
+        //{"pep_api_file_unlink_pre",        handler::skip_operation},
+        //{"pep_database_unreg_replica_pre", handler::skip_operation},
+        //{"pep_resource_unregistered_pre",  handler::skip_operation},
+        //{"pep_resource_unlink_pre",        handler::skip_operation}
     };
 
     const handler_map_type commands{
@@ -281,6 +294,7 @@ namespace
 
     auto rule_exists(irods::default_re_ctx&, const std::string& rule_name, bool& exists) -> irods::error
     {
+        //log::rule_engine::trace("hard-links - rule exists = {}", rule_name);
         exists = pep_handlers.find(rule_name) != std::end(pep_handlers);
         return SUCCESS();
     }
