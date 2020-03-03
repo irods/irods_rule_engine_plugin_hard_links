@@ -50,6 +50,7 @@ namespace
             return *rei;
         }
 
+        // TODO Remove this.
         template <typename Function>
         auto sudo(ruleExecInfo_t& rei, Function func) -> decltype(func())
         {
@@ -159,92 +160,21 @@ namespace
 
     namespace handler
     {
-        class pep_api_data_obj_rename final
-        {
-        public:
-            pep_api_data_obj_rename() = delete;
-
-            static auto reset() -> void
-            {
-                siblings_.clear();
-            }
-
-            static auto pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
-            {
-                reset();
-
-                try
-                {
-                    auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
-                    auto& conn = *util::get_rei(effect_handler).rsComm;
-                    siblings_ = util::get_sibling_data_objects(conn, input->srcDataObjInp.objPath);
-                }
-                catch (const std::exception& e)
-                {
-                    util::log_exception_message(e.what(), effect_handler);
-                    return ERROR(RE_RUNTIME_ERROR, e.what());
-                }
-
-                return CODE(RULE_ENGINE_CONTINUE);
-            }
-
-            static auto post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
-            {
-                try
-                {
-                    auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
-                    auto& conn = *util::get_rei(effect_handler).rsComm;
-                    const auto physical_path = util::get_physical_path(conn, input->destDataObjInp.objPath);
-
-                    for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
-                        // TODO Should we throw?
-                        //      Should this be an atomic operation?
-                        //      What should happen if one of many hard-links fails to be updated?
-                        const auto ec = util::set_physical_path(conn, sibling, physical_path);
-                        log::rule_engine::trace("rename post - setting physical path of data object [{}] to [{}] :::: ec = {}", sibling.c_str(), physical_path, ec);
-                    }
-                }
-                catch (const std::exception& e)
-                {
-                    util::log_exception_message(e.what(), effect_handler);
-                    return ERROR(RE_RUNTIME_ERROR, e.what());
-                }
-
-                return CODE(RULE_ENGINE_CONTINUE);
-            }
-
-        private:
-            inline static std::vector<fs::path> siblings_;
-        }; // class pep_api_data_obj_rename
-
-        auto pep_api_data_obj_unlink_pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
+        auto pep_api_data_obj_rename_post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
             try
             {
-                auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
+                auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
                 auto& conn = *util::get_rei(effect_handler).rsComm;
+                const auto physical_path = util::get_physical_path(conn, input->destDataObjInp.objPath);
 
-                // Unregister the data object.
-                // Hard-links do NOT appear in the trash.
-                if (const auto uuid = util::get_uuid(conn, input->objPath); uuid && util::get_data_objects(conn, *uuid).size() > 1) {
-                    log::rule_engine::debug("unlink pre - removing hard-link [{}] ...", input->objPath);
-
-                    dataObjInp_t unreg_input{};
-                    unreg_input.oprType = UNREG_OPR;
-                    rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
-                    addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
-
-                    if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                        log::rule_engine::error("Could not unregister hard-link [{}]", input->objPath);
-                        return ERROR(ec, "Hard-Link update error");
-                    }
-
-                    log::rule_engine::debug("Successfully removed hard-link [{}]", input->objPath);
-
-                    return CODE(RULE_ENGINE_SKIP_OPERATION);
+                for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
+                    // TODO Should we throw?
+                    //      Should this be an atomic operation?
+                    //      What should happen if one of many hard-links fails to be updated?
+                    const auto ec = util::set_physical_path(conn, sibling, physical_path);
+                    log::rule_engine::trace("rename post - setting physical path of data object [{}] to [{}] :::: ec = {}", sibling.c_str(), physical_path, ec);
                 }
-
-                log::rule_engine::debug("unlink pre - removing data object ...");
             }
             catch (const std::exception& e)
             {
@@ -255,6 +185,45 @@ namespace
             return CODE(RULE_ENGINE_CONTINUE);
         }
 
+        auto remove_hard_link(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
+        {
+            try
+            {
+                auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
+                auto& conn = *util::get_rei(effect_handler).rsComm;
+
+                // Unregister the data object.
+                // Hard-links do NOT appear in the trash.
+                if (const auto uuid = util::get_uuid(conn, input->objPath); uuid && util::get_data_objects(conn, *uuid).size() > 1) {
+                    log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
+
+                    dataObjInp_t unreg_input{};
+                    unreg_input.oprType = UNREG_OPR;
+                    rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
+                    addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
+
+                    if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
+                        log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
+                        return ERROR(ec, "Hard-Link update error");
+                    }
+
+                    log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
+
+                    return CODE(RULE_ENGINE_SKIP_OPERATION);
+                }
+
+                log::rule_engine::trace("Removing data object ...");
+            }
+            catch (const std::exception& e)
+            {
+                util::log_exception_message(e.what(), effect_handler);
+                return ERROR(RE_RUNTIME_ERROR, e.what());
+            }
+
+            return CODE(RULE_ENGINE_CONTINUE);
+        }
+
+        // TODO Remove this.
         auto skip_operation(std::list<boost::any>&, irods::callback&) -> irods::error
         {
             return CODE(RULE_ENGINE_SKIP_OPERATION);
@@ -271,16 +240,9 @@ namespace
     // clang-format on
 
     const handler_map_type pep_handlers{
-        {"pep_api_data_obj_rename_post",   handler::pep_api_data_obj_rename::post},
-        {"pep_api_data_obj_unlink_pre",    handler::pep_api_data_obj_unlink_pre},
-        // TODO Need to handle trim operations.
-        //{"pep_api_data_obj_trim_pre",        handler::skip_operation},
-
-        // TODO These are no longer needed with the latest changes to the REPF.
-        //{"pep_api_file_unlink_pre",        handler::skip_operation},
-        //{"pep_database_unreg_replica_pre", handler::skip_operation},
-        //{"pep_resource_unregistered_pre",  handler::skip_operation},
-        //{"pep_resource_unlink_pre",        handler::skip_operation}
+        {"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename_post},
+        {"pep_api_data_obj_unlink_pre",  handler::remove_hard_link},
+        {"pep_api_data_obj_trim_pre",    handler::remove_hard_link},
     };
 
     const handler_map_type commands{
@@ -294,7 +256,6 @@ namespace
 
     auto rule_exists(irods::default_re_ctx&, const std::string& rule_name, bool& exists) -> irods::error
     {
-        //log::rule_engine::trace("hard-links - rule exists = {}", rule_name);
         exists = pep_handlers.find(rule_name) != std::end(pep_handlers);
         return SUCCESS();
     }
@@ -323,7 +284,7 @@ namespace
             return (iter->second)(rule_arguments, effect_handler);
         }
 
-        log::rule_engine::error("Rule not supported [rule => {}]", rule_name);
+        log::rule_engine::error("Rule not supported [{}]", rule_name);
 
         return CODE(RULE_ENGINE_CONTINUE);
     }
@@ -336,8 +297,8 @@ namespace
 using pluggable_rule_engine = irods::pluggable_rule_engine<irods::default_re_ctx>;
 
 extern "C"
-pluggable_rule_engine* plugin_factory(const std::string& _instance_name,
-                                      const std::string& _context)
+auto plugin_factory(const std::string& _instance_name,
+                    const std::string& _context) -> pluggable_rule_engine*
 {
     // clang-format off
     const auto no_op         = [](auto&&...) { return SUCCESS(); };
