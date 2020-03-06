@@ -1,3 +1,4 @@
+#include <irods/filesystem/filesystem_error.hpp>
 #include <irods/irods_plugin_context.hpp>
 #include <irods/irods_re_plugin.hpp>
 #include <irods/irods_re_serialization.hpp>
@@ -169,9 +170,38 @@ namespace
             return links;
         }
 
+        // TODO Include the UUID. Could return unwanted data objects. The UUID scopes things correctly.
+        auto get_links_by_resource_id(rsComm_t& conn, std::string_view resource_id) -> std::vector<fs::path>
+        {
+            const auto gql = fmt::format("select COLL_NAME, DATA_NAME where META_DATA_ATTR_UNITS = '{}' and META_DATA_ATTR_NAME = 'irods::hard_link'", resource_id);
+
+            std::vector<fs::path> links;
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                links.push_back(fs::path{row[0]} / row[1]);
+            }
+
+            return links;
+        }
+
         auto get_physical_path(rsComm_t& conn, const fs::path& p, int replica_number = 0) -> std::string
         {
             const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}'",
+                                         p.parent_path().c_str(),
+                                         p.object_name().c_str());
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                if (std::stoi(row[1]) == replica_number) {
+                    return row[0];
+                }
+            }
+
+            throw std::runtime_error{fmt::format("Could not retrieve physical path for [{}]", p.c_str())};
+        }
+
+        auto get_resource_id(rsComm_t& conn, const fs::path& p, int replica_number = 0) -> std::string
+        {
+            const auto gql = fmt::format("select RESC_ID, DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}'",
                                          p.parent_path().c_str(),
                                          p.object_name().c_str());
 
@@ -214,14 +244,6 @@ namespace
                 const auto physical_path = util::get_physical_path(conn, input->destDataObjInp.objPath);
 
                 for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
-                    // TODO Check error code.
-                    // Should we throw?
-                    // Should this be an atomic operation?
-                    // What should happen if one of many hard-links fail to be updated?
-                    //
-                    // From code review:
-                    // - Introduce general-purpose batch/bulk catalog statements as API plugin.
-                    // - Supports atomic or individual statements.
                     if (const auto ec = util::set_physical_path(conn, sibling, physical_path); ec < 0) {
                         log::rule_engine::error("Could not update physical path of [{}] to [{}]. "
                                                 "Use iadmin modrepl to update remaining data objects.",
@@ -230,10 +252,6 @@ namespace
 
                         addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, RE_RUNTIME_ERROR, "");
                     }
-
-                    //log::rule_engine::trace("Setting physical path of data object [{}] to [{}] :::: ec = {}",
-                    //                        sibling.c_str(),
-                    //                        physical_path, ec);
                 }
             }
             catch (const std::exception& e) {
@@ -246,9 +264,6 @@ namespace
 
         auto pep_api_data_obj_unlink_pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
-            // TODO Use resource id as the avu unit to identify which replicas are participating in
-            // the hard-link group.
-
             try {
                 auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
                 auto& conn = *util::get_rei(effect_handler).rsComm;
@@ -283,77 +298,85 @@ namespace
             return CODE(RULE_ENGINE_CONTINUE);
         }
 
-        class pep_api_data_obj_trim final
+        auto pep_api_data_obj_trim_pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
-        public:
-            pep_api_data_obj_trim() = delete;
+            try {
+                auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
+                auto& conn = *util::get_rei(effect_handler).rsComm;
 
-            static auto pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
-            {
-                try {
-                    auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
-                    auto& conn = *util::get_rei(effect_handler).rsComm;
-
-                    // TODO May be able to avoid this query by including the hard-link UUID value in
-                    // the results returned by util::get_links_to_physical_path(). This is primarily a
-                    // sanity check to guarantee that we are working with a hard-link.
-                    if (const auto uuid = util::get_uuid(conn, input->objPath); uuid) {
-                        const auto replica_number = [input] {
-                            if (const auto* value = getValByKey(&input->condInput, REPL_NUM_KW); value) {
-                                return std::stoi(value);
-                            }
-
-                            return 0;
-                        }();
-
-                        const auto physical_path = util::get_physical_path(conn, input->objPath, replica_number);
-                        const auto links = util::get_links_to_physical_path(conn, physical_path);
-                        log::rule_engine::trace("LINK COUNT = {}, PHYSICAL PATH = {}", links.size(), physical_path);
-
-                        const auto number_of_replicas_to_keep = [input] {
-                            if (const auto* value = getValByKey(&input->condInput, COPIES_KW); value) {
-                                return std::stoi(value);
-                            }
-
-                            return DEF_MIN_COPY_CNT;
-                        }();
-
-                        if (links.size() > 1 && links.size() > number_of_replicas_to_keep) {
-                            log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
-
-                            dataObjInp_t unreg_input{};
-                            unreg_input.oprType = UNREG_OPR;
-                            rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
-                            addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
-                            addKeyVal(&unreg_input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
-
-                            if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                                log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
-                                return ERROR(ec, "Hard-Link removal error");
-                            }
-
-                            log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
-
-                            return CODE(RULE_ENGINE_SKIP_OPERATION);
+                // TODO May be able to avoid this query by including the hard-link UUID value in
+                // the results returned by util::get_links_to_physical_path(). This is primarily a
+                // sanity check to guarantee that we are working with a hard-link.
+                if (const auto uuid = util::get_uuid(conn, input->objPath); uuid) {
+                    const auto replica_number = [input] {
+                        if (const auto* value = getValByKey(&input->condInput, REPL_NUM_KW); value) {
+                            return std::stoi(value);
                         }
+
+                        // Leave a useful comment.
+                        // FIXME Replica zero may not be available because it was trimmed.
+                        // Throw an error!!!!!!
+                        THROW(USER_INVALID_REPLICA_INPUT, "");
+                    }();
+
+                    //const auto physical_path = util::get_physical_path(conn, input->objPath, replica_number);
+                    //auto links = util::get_links_to_physical_path(conn, physical_path);
+                    const auto resource_id = util::get_resource_id(conn, input->objPath, replica_number);
+                    auto links = util::get_links_by_resource_id(conn, resource_id);
+                    //log::rule_engine::trace("LINK COUNT = {}, PHYSICAL PATH = {}", links.size(), physical_path);
+                    log::rule_engine::trace("LINK COUNT = {}", links.size());
+
+                    const auto number_of_replicas_to_keep = [input] {
+                        if (const auto* value = getValByKey(&input->condInput, COPIES_KW); value) {
+                            return std::stoi(value);
+                        }
+
+                        return DEF_MIN_COPY_CNT;
+                    }();
+
+                    if (links.size() > 1 && links.size() > number_of_replicas_to_keep) {
+                        log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
+
+                        dataObjInp_t unreg_input{};
+                        unreg_input.oprType = UNREG_OPR;
+                        rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
+                        addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
+                        addKeyVal(&unreg_input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
+
+                        if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
+                            log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
+                            return ERROR(ec, "Hard-Link removal error");
+                        }
+
+                        log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
+
+                        // If the number of links was two before unregistering the replica, then we
+                        // now have one link left (which doesn't make sense). Therefore, the server needs
+                        // to delete the hard-link metadata attached to the data object.
+                        if (links.size() == 2) {
+                            for (auto&& l : links) {
+                                log::rule_engine::trace("link = {}", l.c_str());
+                                fs::server::remove_metadata(conn, l, {"irods::hard_link", *uuid, resource_id});
+                            }
+                        }
+
+                        return CODE(RULE_ENGINE_SKIP_OPERATION);
                     }
                 }
-                catch (const std::exception& e) {
-                    util::log_exception_message(e.what(), effect_handler);
-                    return ERROR(RE_RUNTIME_ERROR, e.what());
-                }
-
-                return CODE(RULE_ENGINE_CONTINUE);
+            }
+            catch (const fs::filesystem_error& e) {
+                // TODO
+            }
+            catch (const irods::exception& e) {
+                // TODO
+            }
+            catch (const std::exception& e) {
+                util::log_exception_message(e.what(), effect_handler);
+                return ERROR(RE_RUNTIME_ERROR, e.what());
             }
 
-            static auto post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
-            {
-                // TODO Needs to remove hard-link metadata on success.
-                return CODE(RULE_ENGINE_CONTINUE);
-            }
-
-        private:
-        }; // class pep_api_data_obj_trim
+            return CODE(RULE_ENGINE_CONTINUE);
+        }
 
         auto make_hard_link(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
@@ -454,9 +477,7 @@ namespace
     const handler_map_type pep_handlers{
         {"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename_post},
         {"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink_pre},
-        {"pep_api_data_obj_trim_post",   handler::pep_api_data_obj_trim::post},
-        {"pep_api_data_obj_trim_pre",    handler::pep_api_data_obj_trim::pre}
-        // TODO {"pep_api_data_obj_repl_post", handler::pep_api_data_obj_repl_post}
+        {"pep_api_data_obj_trim_pre",    handler::pep_api_data_obj_trim_pre}
     };
 
     // TODO Could expose these as a new .so. The .so would then be loaded by the new "irods" cli.
@@ -594,10 +615,10 @@ auto plugin_factory(const std::string& _instance_name,
     const auto no_op = [](auto&&...) { return SUCCESS(); };
 
     const auto exec_rule_text_wrapper = [](irods::default_re_ctx&,
-                                                 const std::string& rule_text,
-                                                 msParamArray_t*,
-                                                 const std::string&,
-                                                 irods::callback effect_handler)
+                                           const std::string& rule_text,
+                                           msParamArray_t*,
+                                           const std::string&,
+                                           irods::callback effect_handler)
     {
         return exec_rule_text_impl(rule_text, effect_handler);
     };
