@@ -1,5 +1,3 @@
-#include <irods/filesystem/filesystem.hpp>
-#include <irods/filesystem/filesystem_error.hpp>
 #include <irods/irods_plugin_context.hpp>
 #include <irods/irods_re_plugin.hpp>
 #include <irods/irods_re_serialization.hpp>
@@ -18,9 +16,9 @@
 #include <irods/irods_query.hpp>
 #include <irods/rsModDataObjMeta.hpp>
 #include <irods/rsDataObjUnlink.hpp>
+#include <irods/rsDataObjTrim.hpp> // For DEF_MIN_COPY_CNT
 #include <irods/rsPhyPathReg.hpp>
 
-#include "boost/any.hpp"
 #include "json.hpp"
 
 #include "boost/uuid/uuid.hpp"
@@ -45,6 +43,14 @@ namespace
     using log    = irods::experimental::log;
     using json   = nlohmann::json;
     // clang-format on
+
+    struct data_object_info
+    {
+        std::string physical_path;
+        std::string replica_number;
+        std::string resource_name;
+        std::string resource_id;
+    };
 
     namespace util
     {
@@ -135,14 +141,44 @@ namespace
             return data_objects;
         }
 
-        auto get_physical_path(rsComm_t& conn, const fs::path& p) -> std::string
+        auto get_data_object_info(rsComm_t& conn, const fs::path& p) -> std::vector<data_object_info>
         {
-            const auto gql = fmt::format("select DATA_PATH where COLL_NAME = '{}' and DATA_NAME = '{}'",
+            const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM, RESC_NAME, RESC_ID where COLL_NAME = '{}' and DATA_NAME = '{}'",
+                                         p.parent_path().c_str(),
+                                         p.object_name().c_str());
+
+            std::vector<data_object_info> info;
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                info.push_back({row[0], row[1], row[2], row[3]});
+            }
+
+            return info;
+        }
+
+        auto get_links_to_physical_path(rsComm_t& conn, const fs::path& p) -> std::vector<fs::path>
+        {
+            const auto gql = fmt::format("select COLL_NAME, DATA_NAME where DATA_PATH = '{}' and META_DATA_ATTR_NAME = 'irods::hard_link'", p.c_str());
+
+            std::vector<fs::path> links;
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                links.push_back(fs::path{row[0]} / row[1]);
+            }
+
+            return links;
+        }
+
+        auto get_physical_path(rsComm_t& conn, const fs::path& p, int replica_number = 0) -> std::string
+        {
+            const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}'",
                                          p.parent_path().c_str(),
                                          p.object_name().c_str());
 
             for (auto&& row : irods::query{&conn, gql}) {
-                return row[0];
+                if (std::stoi(row[1]) == replica_number) {
+                    return row[0];
+                }
             }
 
             throw std::runtime_error{fmt::format("Could not retrieve physical path for [{}]", p.c_str())};
@@ -254,34 +290,53 @@ namespace
 
             static auto pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
             {
-                // TODO Use resource id as the avu unit to identify which replicas are participating in
-                // the hard-link group.
-
                 try {
                     auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
                     auto& conn = *util::get_rei(effect_handler).rsComm;
 
-                    // Unregister the data object.
-                    // Hard-links do NOT appear in the trash.
-                    if (const auto uuid = util::get_uuid(conn, input->objPath); uuid && util::get_data_objects(conn, *uuid).size() > 1) {
-                        log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
+                    // TODO May be able to avoid this query by including the hard-link UUID value in
+                    // the results returned by util::get_links_to_physical_path(). This is primarily a
+                    // sanity check to guarantee that we are working with a hard-link.
+                    if (const auto uuid = util::get_uuid(conn, input->objPath); uuid) {
+                        const auto replica_number = [input] {
+                            if (const auto* value = getValByKey(&input->condInput, REPL_NUM_KW); value) {
+                                return std::stoi(value);
+                            }
 
-                        dataObjInp_t unreg_input{};
-                        unreg_input.oprType = UNREG_OPR;
-                        rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
-                        addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
+                            return 0;
+                        }();
 
-                        if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                            log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
-                            return ERROR(ec, "Hard-Link removal error");
+                        const auto physical_path = util::get_physical_path(conn, input->objPath, replica_number);
+                        const auto links = util::get_links_to_physical_path(conn, physical_path);
+                        log::rule_engine::trace("LINK COUNT = {}, PHYSICAL PATH = {}", links.size(), physical_path);
+
+                        const auto number_of_replicas_to_keep = [input] {
+                            if (const auto* value = getValByKey(&input->condInput, COPIES_KW); value) {
+                                return std::stoi(value);
+                            }
+
+                            return DEF_MIN_COPY_CNT;
+                        }();
+
+                        if (links.size() > 1 && links.size() > number_of_replicas_to_keep) {
+                            log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
+
+                            dataObjInp_t unreg_input{};
+                            unreg_input.oprType = UNREG_OPR;
+                            rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
+                            addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
+                            addKeyVal(&unreg_input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
+
+                            if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
+                                log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
+                                return ERROR(ec, "Hard-Link removal error");
+                            }
+
+                            log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
+
+                            return CODE(RULE_ENGINE_SKIP_OPERATION);
                         }
-
-                        log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
-
-                        return CODE(RULE_ENGINE_SKIP_OPERATION);
                     }
-
-                    log::rule_engine::trace("Removing data object ...");
                 }
                 catch (const std::exception& e) {
                     util::log_exception_message(e.what(), effect_handler);
@@ -293,6 +348,7 @@ namespace
 
             static auto post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
             {
+                // TODO Needs to remove hard-link metadata on success.
                 return CODE(RULE_ENGINE_CONTINUE);
             }
 
@@ -301,32 +357,47 @@ namespace
 
         auto make_hard_link(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
-            // Inputs:
-            // - Physical path
-            // - Unique logical path
-            // - UUID
-            //
-            // 1. Register the physical path as the logical path.
-            // 2. Generate a catalog-unique UUID.
-            // 3. Attach the UUID to the new logical path.
-
             try {
                 auto args_iter = std::begin(rule_arguments);
                 const auto logical_path = boost::any_cast<std::string>(*args_iter);
+                const auto replica_number = boost::any_cast<int>(*++args_iter);
                 const auto link_name = boost::any_cast<std::string>(*++args_iter);
+
                 auto& conn = *util::get_rei(effect_handler).rsComm;
 
-                const auto physical_path = util::get_physical_path(conn, logical_path);
+                if (fs::server::exists(conn, link_name)) {
+                    return ERROR(CAT_NAME_EXISTS_AS_DATAOBJ, "The specified link name already exists");
+                }
 
+                const auto data_object_info = util::get_data_object_info(conn, logical_path);
+
+                if (data_object_info.empty()) {
+                    log::rule_engine::error("Could not gather data object information.");
+                    return ERROR(SYS_INTERNAL_ERR, "Could not gather data object information");
+                }
+
+                const auto& info = [&replica_number, &data_object_info] {
+                    for (auto&& info : data_object_info) {
+                        if (std::stoi(info.replica_number) == replica_number) {
+                            return info;
+                        }
+                    }
+
+                    THROW(USER_INVALID_REPLICA_INPUT, "Replica does not exist");
+                }();
+
+                // Register the new logical path.
                 dataObjInp_t input{};
-                addKeyVal(&input.condInput, FILE_PATH_KW, physical_path.data());
+                addKeyVal(&input.condInput, FILE_PATH_KW, info.physical_path.data());
+                addKeyVal(&input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
                 rstrcpy(input.objPath, link_name.data(), MAX_NAME_LEN);
 
                 if (const auto ec = rsPhyPathReg(&conn, &input); ec < 0) {
-                    log::rule_engine::error("Could not make hard-link [ec = {}, physical_path = {}, link_name = {}]", ec, physical_path, link_name);
+                    log::rule_engine::error("Could not make hard-link [ec = {}, physical_path = {}, link_name = {}]", ec, info.physical_path, link_name);
+                    return ERROR(ec, "Could not register physical path as a data object");
                 }
 
-                log::rule_engine::trace("Successfully registered data object [logical_path = {}, physical_path = {}]", logical_path.data(), physical_path.data());
+                log::rule_engine::trace("Successfully registered data object [logical_path = {}, physical_path = {}]", logical_path.data(), info.physical_path.data());
 
                 const auto uuid = [&conn, &logical_path] {
                     // If a UUID has already been assigned to the source logical path, then return that.
@@ -347,30 +418,21 @@ namespace
                     return std::make_tuple(true, uuid);
                 }();
 
-                // Get the resource id of the source logical path.
-                const auto resc_id = [&conn, p = fs::path{logical_path}] {
-                    const auto gql = fmt::format("select RESC_ID where COLL_NAME = '{}' and DATA_NAME = '{}'",
-                                                 p.parent_path().c_str(),
-                                                 p.object_name().c_str());
-
-                    for (auto&& row : irods::query{&conn, gql}) {
-                        return row[0];
-                    }
-
-                    THROW(SYS_INTERNAL_ERR, "Could not get resource id for source logical path");
-                }();
-
                 try {
-                    fs::server::set_metadata(conn, link_name, {"irods::hard_link", std::get<std::string>(uuid), resc_id});
+                    fs::server::set_metadata(conn, link_name, {"irods::hard_link", std::get<std::string>(uuid), info.resource_id});
 
                     if (const auto& [new_uuid, uuid_value] = uuid; new_uuid) {
-                        fs::server::set_metadata(conn, logical_path, {"irods::hard_link", uuid_value, resc_id});
+                        fs::server::set_metadata(conn, logical_path, {"irods::hard_link", uuid_value, info.resource_id});
                     }
                 }
                 catch (const fs::filesystem_error& e) {
                     log::rule_engine::error("Could not set hard-link metadata [msg = {}, ec = {}]", e.what(), e.code().value());
                     return ERROR(e.code().value(), e.what());
                 }
+            }
+            catch (const irods::exception& e) {
+                util::log_exception_message(e.what(), effect_handler);
+                return e;
             }
             catch (const std::exception& e) {
                 util::log_exception_message(e.what(), effect_handler);
@@ -394,6 +456,7 @@ namespace
         {"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink_pre},
         {"pep_api_data_obj_trim_post",   handler::pep_api_data_obj_trim::post},
         {"pep_api_data_obj_trim_pre",    handler::pep_api_data_obj_trim::pre}
+        // TODO {"pep_api_data_obj_repl_post", handler::pep_api_data_obj_repl_post}
     };
 
     // TODO Could expose these as a new .so. The .so would then be loaded by the new "irods" cli.
@@ -470,6 +533,7 @@ namespace
             if (const auto iter = hard_link_handlers.find(op); iter != std::end(hard_link_handlers)) {
                 std::list<boost::any> args{
                     json_args.at("logical_path").get<std::string>(),
+                    json_args.at("replica_number").get<int>(),
                     json_args.at("link_name").get<std::string>()
                 };
 
