@@ -3,6 +3,7 @@ from __future__ import print_function
 import os
 import sys
 import shutil
+import json
 
 from time import sleep
 
@@ -27,86 +28,92 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         super(Test_Rule_Engine_Plugin_Hard_Links, self).tearDown()
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
-    def test_update_collection_mtime(self):
+    def test_irm(self):
 	config = IrodsConfig()
 
         with lib.file_backed_up(config.server_config_path):
-            self.enable_mtime_rep(config)
-            self.run_collection_pep_tests()
-            self.run_data_object_pep_tests()
-            self.run_irule_tests(config.server_config['plugin_configuration']['rule_engines'])
+            self.enable_hard_links_rule_engine_plugin(config)
 
-    def enable_mtime_rep(self, config):
-        # Add the MTime REP to the beginning of the rule engines list.
+            # Put a file: foo
+            data_object = 'foo'
+            file_path = os.path.join(self.admin.local_session_dir, data_object)
+            lib.make_file(file_path, 1024, 'arbitrary')
+            self.admin.assert_icommand(['iput', file_path])
+
+            # Create two hard-links to the data object previously put into iRODS.
+            hard_link_a = os.path.join(self.admin.session_collection, 'foo.0')
+            self.make_hard_link(os.path.basename(filename), 0, hard_link_a)
+
+            hard_link_b = os.path.join(self.admin.session_collection, 'foo.1')
+            self.make_hard_link(os.path.basename(filename), 0, hard_link_b)
+
+            # Verify that all data objects have the same metadata AVUs.
+            # Verify that the physical path is the same for each data object.
+            uuid = self.get_uuid(data_object)
+            resource_id = self.get_resource_id(data_object)
+            physical_path = self.get_physical_path(data_object)
+            for path in [data_object, hard_link_a, hard_link_b]:
+                self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [physical_path])
+                self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                    'attribute: irods::hard_link',
+                    'value: {0}'.format(uuid),
+                    'units: {0}'.format(resource_id)
+                ])
+
+            # Remove all data objects starting with the hard-links.
+            count = 3
+            for path in [hard_link_b, hard_link_a, data_object]:
+                self.assertTrue(self.hard_link_count(physical_path) == count)
+                self.admin.assert_icommand(['irm', '-f', path])
+                count -= 1
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_itrim(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+    def enable_hard_links_rule_engine_plugin(self, config):
         config.server_config['plugin_configuration']['rule_engines'].insert(0, {
-            'instance_name': 'irods_rule_engine_plugin-update_collection_mtime-instance',
-            'plugin_name': 'irods_rule_engine_plugin-update_collection_mtime',
+            'instance_name': 'irods_rule_engine_plugin-hard_links-instance',
+            'plugin_name': 'irods_rule_engine_plugin-hard_links',
             'plugin_specific_configuration': {}
         })
-
-        # Save the changes.
         lib.update_json_file_from_dict(config.server_config_path, config.server_config)
 
-    def run_collection_pep_tests(self):
-        collection = 'rep_mtime_col.d'
-        copied_collection = 'rep_mtime_col.copied.d'
+    def make_hard_link(self, logical_path, replica_number, link_name):
+        hard_link_op = json.dumps({
+            'operation': 'hard_links_make_link',
+            'logical_path': logical_path,
+            'replica_number': replica_number,
+            'link_name': link_name
+        })
+        self.admin.assert_icommand(['irule', '-r', 'irods_rule_engine_plugin-hard_links-instance', hard_link_op])
 
-        self.run_create_collection_test(collection)
-        self.run_copy_collection_test(collection, copied_collection)
-        self.run_remove_collection_test(collection)
+    def get_uuid(self, data_object):
+        gql = "select META_DATA_ATTR_VALUE where COLL_NAME = {0} and DATA_NAME = {1} and META_DATA_ATTR_NAME = 'irods::hard_link'"
+        coll_name = os.path.dirname(data_object)
+        data_name = os.path.basename(data_object)
+        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name)])
+        return str(utf8_query_result_string)
 
-    def run_data_object_pep_tests(self):
-        filename = 'rep_mtime_file.txt'
-        new_filename = 'rep_mtime_file.renamed.txt'
-        copied_filename = 'rep_mtime_file.copied.txt'
+    def get_resource_id(self, data_object):
+        gql = "select RESC_ID where COLL_NAME = {0} and DATA_NAME = {1} and META_DATA_ATTR_NAME = 'irods::hard_link'"
+        coll_name = os.path.dirname(data_object)
+        data_name = os.path.basename(data_object)
+        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name)])
+        return str(utf8_query_result_string)
 
-        self.run_put_data_object_test(filename)
-        self.run_rename_data_object_test(filename, new_filename)
-        self.run_copy_data_object_test(new_filename, copied_filename)
-        self.run_remove_data_object_test(new_filename)
+    def get_physical_path(self, data_object):
+        gql = "select DATA_PATH where COLL_NAME = {0} and DATA_NAME = {1} and META_DATA_ATTR_NAME = 'irods::hard_link'"
+        coll_name = os.path.dirname(data_object)
+        data_name = os.path.basename(data_object)
+        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name)])
+        return str(utf8_query_result_string)
 
-        os.remove(filename)
-
-    def run_irule_tests(self, rule_engines):
-        native_rep = 'irods_rule_engine_plugin-irods_rule_language'
-
-        # Run this test only if the NREP is configured.
-        for re in rule_engines:
-            if re['plugin_name'] == native_rep:
-                msg = 'THIS SHOULD NOT PRODUCE AN ERROR!'
-                cmd = 'irule -r {0}-instance \'writeLine("stdout", "{1}")\' null ruleExecOut'.format(native_rep, msg)
-                self.admin.assert_icommand(cmd, 'STDOUT', msg)
-                break
-
-    def run_create_collection_test(self, collection):
-        self.run_test(lambda: self.admin.run_icommand(['imkdir', collection]))
-
-    def run_copy_collection_test(self, src_collection, dst_collection):
-        self.run_test(lambda: self.admin.run_icommand(['icp', src_collection, dst_collection]))
-
-    def run_remove_collection_test(self, collection):
-        self.run_test(lambda: self.admin.run_icommand(['irmdir', collection]))
-
-    def run_put_data_object_test(self, filename):
-        lib.make_file(filename, 1)
-        self.run_test(lambda: self.admin.run_icommand(['iput', filename]))
-
-    def run_rename_data_object_test(self, filename, new_filename):
-        self.run_test(lambda: self.admin.run_icommand(['imv', filename, new_filename]))
-
-    def run_copy_data_object_test(self, src_filename, dst_filename):
-        self.run_test(lambda: self.admin.run_icommand(['icp', src_filename, dst_filename]))
-
-    def run_remove_data_object_test(self, filename):
-        self.run_test(lambda: self.admin.run_icommand(['irm', '-f', filename]))
-
-    def run_test(self, trigger_mtime_update_func):
-        old_mtime = self.get_mtime(self.admin.session_collection)
-        sleep(2) # Guarantees that the following operation produces a different mtime.
-        trigger_mtime_update_func()
-        self.assertTrue(self.get_mtime(self.admin.session_collection) != old_mtime)
-
-    def get_mtime(self, coll_path):
-        mtime, ec, rc = self.admin.run_icommand('iquest %s "select COLL_MODIFY_TIME where COLL_NAME = \'{0}\'"'.format(coll_path))
-        return int(mtime)
+    def hard_link_count(self, uuid, resource_id):
+        gql = "select COUNT(DATA_NAME) where META_DATA_ATTR_NAME = 'irods::hard_link' and META_DATA_ATTR_VALUE = {0} and RESC_ID = {1}"
+        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(uuid, resource_id)])
+        return int(str(utf8_query_result_string))
 

@@ -313,6 +313,10 @@ namespace
                             return std::stoi(value);
                         }
 
+                        // TODO Handle resource hierarchies.
+                        // hier -> replica number
+                        // RESC_NAME / RESC_ID
+
                         // Leave a useful comment.
                         // FIXME Replica zero may not be available because it was trimmed.
                         // Throw an error!!!!!!
