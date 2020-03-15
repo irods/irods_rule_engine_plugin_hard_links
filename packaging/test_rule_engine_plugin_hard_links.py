@@ -97,7 +97,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             os.mkdir(vault_directory)
             vault = socket.gethostname() + ':' + vault_directory
             other_resc = 'otherResc'
-            self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault])
+            self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault], 'STDOUT', [other_resc])
 
             # Replicate the hard-link to the new resource.
             self.admin.assert_icommand(['irepl', '-R', other_resc, hard_link_a])
@@ -126,20 +126,22 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.assertFalse(physical_path == self.get_physical_path(hard_link_a, replica_number=1))
 
             # Verify the hard-link counts.
-            self.assertTrue(hard_link_count(self, uuid, resource_id) == 3)
-            self.assertTrue(hard_link_count(self, uuid, other_resource_id) == 1)
+            self.assertTrue(self.hard_link_count(uuid, resource_id) == 3)
+            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
 
             # Trim the replica that is shared between three logical paths.
-            self.admin.assert_icommand(['itrim', '-N1', '-n0', hard_link_b])
-            self.assertTrue(hard_link_count(self, uuid, resource_id) == 2)
-            self.assertTrue(hard_link_count(self, uuid, other_resource_id) == 2)
+            self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_b], 'STDOUT', ['trimmed'])
+            self.assertTrue(self.hard_link_count(uuid, resource_id) == 2)
+            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 2)
 
             # Trim the replica that is shared between two logical paths.
             # This will cause all hard-link metadata to be removed because there are zero replicas
             # being shared between logical paths.
-            self.admin.assert_icommand(['itrim', '-N1', '-n0', hard_link_a])
-            self.assertTrue(hard_link_count(self, uuid, resource_id) == 0)
-            self.assertTrue(hard_link_count(self, uuid, other_resource_id) == 0)
+            self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_a], 'STDOUT', ['trimmed'])
+            self.assertTrue(self.hard_link_count(uuid, resource_id) == 0)
+            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 0)
+
+            self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
     def test_imv(self):
@@ -170,24 +172,24 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
         utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
-        return str(utf8_query_result_string)
+        return str(utf8_query_result_string).strip()
 
     def get_resource_id(self, data_object, replica_number=0):
         gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
         utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
-        return str(utf8_query_result_string)
+        return str(utf8_query_result_string).strip()
 
     def get_physical_path(self, data_object, replica_number=0):
         gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
         utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
-        return str(utf8_query_result_string)
+        return str(utf8_query_result_string).strip()
 
     def hard_link_count(self, uuid, resource_id):
         gql = "select COUNT(DATA_NAME) where META_DATA_ATTR_NAME = 'irods::hard_link' and META_DATA_ATTR_VALUE = '{0}' and RESC_ID = '{1}'"
         utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(uuid, resource_id)])
-        return int(str(utf8_query_result_string))
+        return int(str(utf8_query_result_string).strip())
 
