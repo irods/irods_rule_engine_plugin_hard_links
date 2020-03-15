@@ -68,7 +68,7 @@ namespace
         }
 
         // TODO Remove this.
-        template <typename Function>
+        /*template <typename Function>
         auto sudo(ruleExecInfo_t& rei, Function func) -> decltype(func())
         {
             auto& auth_flag = rei.rsComm->clientUser.authInfo.authFlag;
@@ -83,7 +83,7 @@ namespace
             };
 
             return func();
-        }
+        }*/
 
         auto log_exception_message(const char* msg, irods::callback& effect_handler) -> void
         {
