@@ -129,6 +129,9 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 3)
             self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
 
+            # TODO Remove once this passes.
+            self.admin.assert_icommand(['ils', '-L'], 'STDOUT', [' '])
+
             # Trim the replica that is shared between three logical paths.
             self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_b], 'STDOUT', ['trimmed'])
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 2)
@@ -160,7 +163,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
 
     def make_hard_link(self, logical_path, replica_number, link_name):
         hard_link_op = json.dumps({
-            'operation': 'hard_links_make_link',
+            'operation': 'hard_links_create',
             'logical_path': logical_path,
             'replica_number': replica_number,
             'link_name': link_name

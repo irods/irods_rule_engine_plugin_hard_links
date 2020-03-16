@@ -10,15 +10,19 @@
 #include <irods/msParam.h>
 #include <irods/objInfo.h>
 #include <irods/rcMisc.h>
+#include <irods/rodsConnect.h>
 #include <irods/rodsError.h>
 #include <irods/rodsErrorTable.h>
 #include <irods/filesystem.hpp>
 #include <irods/irods_logger.hpp>
 #include <irods/irods_query.hpp>
+#include <irods/rodsType.h>
 #include <irods/rsModDataObjMeta.hpp>
 #include <irods/rsDataObjUnlink.hpp>
 #include <irods/rsDataObjTrim.hpp> // For DEF_MIN_COPY_CNT
 #include <irods/rsPhyPathReg.hpp>
+#include <irods/irods_resource_manager.hpp>
+#include <irods/irods_resource_redirect.hpp>
 
 #include "json.hpp"
 
@@ -35,6 +39,8 @@
 #include <iterator>
 #include <functional>
 #include <optional>
+
+extern irods::resource_manager resc_mgr;
 
 namespace
 {
@@ -66,24 +72,6 @@ namespace
 
             return *rei;
         }
-
-        // TODO Remove this.
-        /*template <typename Function>
-        auto sudo(ruleExecInfo_t& rei, Function func) -> decltype(func())
-        {
-            auto& auth_flag = rei.rsComm->clientUser.authInfo.authFlag;
-            const auto old_auth_flag = auth_flag;
-
-            // Elevate privileges.
-            auth_flag = LOCAL_PRIV_USER_AUTH;
-
-            // Restore authorization flags on exit.
-            irods::at_scope_exit<std::function<void()>> at_scope_exit{
-                [&auth_flag, old_auth_flag] { auth_flag = old_auth_flag; }
-            };
-
-            return func();
-        }*/
 
         auto log_exception_message(const char* msg, irods::callback& effect_handler) -> void
         {
@@ -170,10 +158,15 @@ namespace
             return links;
         }
 
-        // TODO Include the UUID. Could return unwanted data objects. The UUID scopes things correctly.
-        auto get_links_by_resource_id(rsComm_t& conn, std::string_view resource_id) -> std::vector<fs::path>
+        auto get_links_by_resource_id(rsComm_t& conn,
+                                      std::string_view uuid,
+                                      std::string_view resource_id) -> std::vector<fs::path>
         {
-            const auto gql = fmt::format("select COLL_NAME, DATA_NAME where META_DATA_ATTR_UNITS = '{}' and META_DATA_ATTR_NAME = 'irods::hard_link'", resource_id);
+            const auto gql = fmt::format("select COLL_NAME, DATA_NAME "
+                                         "where"
+                                         " META_DATA_ATTR_VALUE = '{}' and"
+                                         " META_DATA_ATTR_UNITS = '{}' and"
+                                         " META_DATA_ATTR_NAME = 'irods::hard_link'", uuid, resource_id);
 
             std::vector<fs::path> links;
 
@@ -211,7 +204,23 @@ namespace
                 }
             }
 
-            throw std::runtime_error{fmt::format("Could not retrieve physical path for [{}]", p.c_str())};
+            throw std::runtime_error{fmt::format("Could not retrieve resource id for [path => {}, replica_number = {}]",
+                                                 p.c_str(), replica_number)};
+        }
+
+        auto get_replica_number(rsComm_t& conn, const fs::path& p, rodsLong_t resource_id) -> int
+        {
+            const auto gql = fmt::format("select DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}' and RESC_ID = '{}'",
+                                         p.parent_path().c_str(),
+                                         p.object_name().c_str(),
+                                         resource_id);
+
+            for (auto&& row : irods::query{&conn, gql}) {
+                return std::stoi(row[0]);
+            }
+
+            throw std::runtime_error{fmt::format("Could not retrieve replica number for [path => {}, resource_id => {}]",
+                                                 p.c_str(), resource_id)};
         }
 
         auto set_physical_path(rsComm_t& conn, const fs::path& logical_path, const fs::path& physical_path) -> int
@@ -304,14 +313,85 @@ namespace
                 auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
                 auto& conn = *util::get_rei(effect_handler).rsComm;
 
-                // TODO May be able to avoid this query by including the hard-link UUID value in
-                // the results returned by util::get_links_to_physical_path(). This is primarily a
-                // sanity check to guarantee that we are working with a hard-link.
                 if (const auto uuid = util::get_uuid(conn, input->objPath); uuid) {
-                    const auto replica_number = [input] {
-                        if (const auto* value = getValByKey(&input->condInput, REPL_NUM_KW); value) {
-                            return std::stoi(value);
+#if 1
+                    const auto [replica_number, resource_id] = [&conn, input] {
+                        std::string hierarchy;
+
+                        if (const auto* hier = getValByKey(&input->condInput, RESC_HIER_STR_KW); !hier) {
+                            // Set a repl keyword so resources can respond accordingly.
+                            addKeyVal(&input->condInput, IN_REPL_KW, "");
+
+                            rodsServerHost_t* host = nullptr;
+                            int local = LOCAL_HOST;
+
+                            if (const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, input, hierarchy, host, local);
+                                !err.ok())
+                            {
+                                log::rule_engine::error("Could not resolve resource hierarchy [error => {}, error code => {}]",
+                                                        err.result(), err.code());
+                                THROW(err.code(), err.result());
+                            }
                         }
+                        else {
+                            hierarchy = hier;
+                        }
+
+                        rodsLong_t resource_id;
+                        if (const auto err = resc_mgr.hier_to_leaf_id(hierarchy, resource_id); !err.ok()) {
+                            log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
+                                                    err.result(), err.code());
+                        }
+
+                        return std::make_tuple(util::get_replica_number(conn, input->objPath, resource_id),
+                                               std::to_string(resource_id));
+                    }();
+#else
+                    const auto [replica_number, resource_id] = [&conn, input] {
+                        if (const auto* value = getValByKey(&input->condInput, REPL_NUM_KW); value) {
+                            const auto replica_number = std::stoi(value);
+                            const auto resource_id = util::get_resource_id(conn, input->objPath, replica_number);
+                            return std::make_tuple(replica_number, resource_id);
+                        }
+                        else if (const auto* value = getValByKey(&input->condInput, RESC_NAME_KW); value) {
+                            log::rule_engine::debug("HARD-LINKS :: RESOURCE = {}", value);
+
+                            irods::resource_ptr resc_ptr;
+                            if (const auto err = resc_mgr.resolve(value, resc_ptr); !err.ok()) {
+                                log::rule_engine::error("Could not resolve resource [error => {}, error code => {}]",
+                                                        err.result(), err.code());
+                            }
+
+                            rodsLong_t resource_id;
+                            if (const auto err = resc_ptr->get_property(irods::RESOURCE_ID, resource_id); !err.ok()) {
+                                log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
+                                                        err.result(), err.code());
+                            }
+
+                            log::rule_engine::debug("HARD-LINKS :: RESOURCE ID = {}", resource_id);
+
+                            const auto replica_number = util::get_replica_number(conn, input->objPath, resource_id);
+
+                            return std::make_tuple(replica_number, std::to_string(resource_id));
+                        }
+
+                        /*
+                        if (const auto* value = getValByKey(&input->condInput, DEF_RESC_NAME_KW); value) {
+                            log::rule_engine::debug("HARD-LINKS :: DEFAULT RESOURCE = {}", value);
+                        }
+
+                        if (const auto* value = getValByKey(&input->condInput, DEST_RESC_NAME_KW); value) {
+                            log::rule_engine::debug("HARD-LINKS :: DESTINATION RESOURCE = {}", value);
+                        }
+
+                        if (const auto* value = getValByKey(&input->condInput, BACKUP_RESC_NAME_KW); value) {
+                            log::rule_engine::debug("HARD-LINKS :: BACKUP RESOURCE = {}", value);
+                        }
+
+                        if (const auto* value = getValByKey(&input->condInput, RESC_HIER_STR_KW); value) {
+                            log::rule_engine::debug("HARD-LINKS :: RESOURCE HIER = {}", value);
+                        }
+                        */
 
                         // TODO Handle resource hierarchies.
                         // hier -> replica number
@@ -322,13 +402,8 @@ namespace
                         // Throw an error!!!!!!
                         THROW(USER_INVALID_REPLICA_INPUT, "");
                     }();
-
-                    //const auto physical_path = util::get_physical_path(conn, input->objPath, replica_number);
-                    //auto links = util::get_links_to_physical_path(conn, physical_path);
-                    const auto resource_id = util::get_resource_id(conn, input->objPath, replica_number);
-                    auto links = util::get_links_by_resource_id(conn, resource_id);
-                    //log::rule_engine::trace("LINK COUNT = {}, PHYSICAL PATH = {}", links.size(), physical_path);
-                    log::rule_engine::trace("LINK COUNT = {}", links.size());
+#endif
+                    auto links = util::get_links_by_resource_id(conn, *uuid, resource_id);
 
                     const auto number_of_replicas_to_keep = [input] {
                         if (const auto* value = getValByKey(&input->condInput, COPIES_KW); value) {
@@ -352,7 +427,7 @@ namespace
                             return ERROR(ec, "Hard-Link removal error");
                         }
 
-                        log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
+                        log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation ...", input->objPath);
 
                         // If the number of links was two before unregistering the replica, then we
                         // now have one link left (which doesn't make sense). Therefore, the server needs
@@ -369,10 +444,12 @@ namespace
                 }
             }
             catch (const fs::filesystem_error& e) {
-                // TODO
+                util::log_exception_message(e.what(), effect_handler);
+                return ERROR(e.code().value(), e.what());
             }
             catch (const irods::exception& e) {
-                // TODO
+                util::log_exception_message(e.what(), effect_handler);
+                return ERROR(e.code(), e.what());
             }
             catch (const std::exception& e) {
                 util::log_exception_message(e.what(), effect_handler);
@@ -489,7 +566,7 @@ namespace
     const handler_map_type hard_link_handlers{
         {"hard_links_count_links", {}},
         {"hard_links_list_data_objects", {}},
-        {"hard_links_make_link", handler::make_hard_link}
+        {"hard_links_create", handler::make_hard_link}
     };
     // clang-format on
 
