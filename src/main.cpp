@@ -25,6 +25,7 @@
 #include <irods/irods_resource_redirect.hpp>
 
 #include "json.hpp"
+#include "fmt/format.h"
 
 #include "boost/uuid/uuid.hpp"
 #include "boost/uuid/uuid_generators.hpp"
@@ -237,6 +238,22 @@ namespace
 
             return rsModDataObjMeta(&conn, &input);
         }
+
+        auto set_data_name(rsComm_t& conn, const fs::path& logical_path, const fs::path& data_name) -> int
+        {
+            dataObjInfo_t info{};
+            rstrcpy(info.objPath, logical_path.c_str(), MAX_NAME_LEN);
+
+            keyValPair_t reg_params{};
+            addKeyVal(&reg_params, DATA_NAME_KW, data_name.c_str());
+            addKeyVal(&reg_params, ALL_KW, "");
+
+            modDataObjMeta_t input{};
+            input.dataObjInfo = &info;
+            input.regParam = &reg_params;
+
+            return rsModDataObjMeta(&conn, &input);
+        }
     } // namespace util
 
     //
@@ -245,14 +262,65 @@ namespace
 
     namespace handler
     {
+        auto pep_api_data_obj_rename_pre(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
+        {
+            try {
+                auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
+                auto& conn = *util::get_rei(effect_handler).rsComm;
+                const fs::path src_path = input->srcDataObjInp.objPath;
+
+                // If the path is part of a hard-link group, then update the data name and
+                // skip the actual rename operation. Else, do nothing and continue to the next REP.
+                if (util::get_uuid(conn, src_path)) {
+                    const fs::path dst_path = input->destDataObjInp.objPath;
+
+                    if (const auto ec = util::set_data_name(conn, src_path, dst_path.object_name()); ec < 0) {
+                        const auto msg = fmt::format("Could not update the data name of [{}] to [{}]. "
+                                                     "Use iadmin modrepl to update data object.",
+                                                     src_path.c_str(),
+                                                     dst_path.c_str());
+                        log::rule_engine::error(msg);
+                        addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, ec, msg.data());
+                    }
+
+                    return CODE(RULE_ENGINE_SKIP_OPERATION);
+                }
+            }
+            catch (const std::exception& e) {
+                util::log_exception_message(e.what(), effect_handler);
+                return ERROR(RE_RUNTIME_ERROR, e.what());
+            }
+
+            return CODE(RULE_ENGINE_CONTINUE);
+        }
+
         auto pep_api_data_obj_rename_post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
             try {
                 auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
                 auto& conn = *util::get_rei(effect_handler).rsComm;
+#if 1
+                const auto data_name = fs::path{input->destDataObjInp.objPath}.object_name();
+
+                for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
+                    // Update the DATA_NAME instead of the physical path.
+                    // Hard-Links aren't allowed to update the physical path, only the logical path.
+                    if (const auto ec = util::set_data_name(conn, sibling, data_name); ec < 0) {
+                        const auto msg = fmt::format("Could not update the data name of [{}] to [{}]. "
+                                                     "Use iadmin modrepl to update remaining data objects.",
+                                                     input->destDataObjInp.objPath,
+                                                     sibling.c_str());
+                        log::rule_engine::error(msg);
+                        addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, ec, msg.data());
+                    }
+                }
+#else
                 const auto physical_path = util::get_physical_path(conn, input->destDataObjInp.objPath);
 
                 for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
+                    // TODO Update the DATA_NAME instead of the physical path.
+                    // Hard-Links aren't allowed to update the physical path, only the logical path.
+                    // Must take the replica number into account, else the REP may update the wrong replica.
                     if (const auto ec = util::set_physical_path(conn, sibling, physical_path); ec < 0) {
                         log::rule_engine::error("Could not update physical path of [{}] to [{}]. "
                                                 "Use iadmin modrepl to update remaining data objects.",
@@ -262,6 +330,7 @@ namespace
                         addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, RE_RUNTIME_ERROR, "");
                     }
                 }
+#endif
             }
             catch (const std::exception& e) {
                 util::log_exception_message(e.what(), effect_handler);
@@ -505,7 +574,8 @@ namespace
     using handler_map_type = std::map<std::string_view, handler_type>;
 
     const handler_map_type pep_handlers{
-        {"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename_post},
+        //{"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename_post},
+        {"pep_api_data_obj_rename_pre",  handler::pep_api_data_obj_rename_pre},
         {"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink_pre},
         {"pep_api_data_obj_trim_pre",    handler::pep_api_data_obj_trim_pre}
     };

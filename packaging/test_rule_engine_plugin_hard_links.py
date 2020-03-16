@@ -156,6 +156,48 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         with lib.file_backed_up(config.server_config_path):
             self.enable_hard_links_rule_engine_plugin(config)
 
+            # Put a file: foo
+            data_object = 'foo'
+            file_path = os.path.join(self.admin.local_session_dir, data_object)
+            lib.make_file(file_path, 1024, 'arbitrary')
+            self.admin.assert_icommand(['iput', file_path])
+            data_object = os.path.join(self.admin.session_collection, data_object)
+
+            # Create a hard-link to the data object previously put into iRODS.
+            hard_link = os.path.join(self.admin.session_collection, 'foo.0')
+            self.make_hard_link(data_object, 0, hard_link)
+
+            # Create new resource.
+            vault_name = 'other_resc_vault'
+            vault_directory = os.path.join(self.admin.local_session_dir, vault_name)
+            os.mkdir(vault_directory)
+            vault = socket.gethostname() + ':' + vault_directory
+            other_resc = 'otherResc'
+            self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault], 'STDOUT', [other_resc])
+
+            # Replicate the data object to the new resource.
+            self.admin.assert_icommand(['irepl', '-R', other_resc, data_object])
+
+            # Rename the original data object and verify that all data objects
+            # point to the same replica.
+            new_name = 'bar'
+            self.admin.assert_icommand(['imv', data_object, new_name])
+            number_of_data_objects_with_same_physical_path = '3'
+            gql = "select count(DATA_PATH) where DATA_PATH like '%/" + new_name + "'"
+            self.admin.assert_icommand(['iquest', '%s', gql], 'STDOUT', ['3'])
+            data_object = new_name
+
+            # Rename the hard-link and verify that all data objects point to the same replica.
+            new_name = 'baz'
+            self.admin.assert_icommand(['imv', hard_link, new_name])
+            gql = "select count(DATA_PATH) where DATA_PATH like '%/" + new_name + "'"
+            self.admin.assert_icommand(['iquest', '%s', gql], 'STDOUT', ['2'])
+            hard_link = new_name
+
+            # Clean-up.
+            self.admin.assert_icommand(['irm', '-f', data_object, hard_link])
+            self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
+
     def enable_hard_links_rule_engine_plugin(self, config):
         config.server_config['plugin_configuration']['rule_engines'].insert(0, {
             'instance_name': 'irods_rule_engine_plugin-hard_links-instance',
