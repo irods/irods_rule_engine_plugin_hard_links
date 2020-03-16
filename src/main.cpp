@@ -314,30 +314,35 @@ namespace
                 auto& conn = *util::get_rei(effect_handler).rsComm;
 
                 if (const auto uuid = util::get_uuid(conn, input->objPath); uuid) {
-#if 1
                     const auto [replica_number, resource_id] = [&conn, input] {
                         std::string hierarchy;
 
                         if (const auto* hier = getValByKey(&input->condInput, RESC_HIER_STR_KW); !hier) {
                             // Set a repl keyword so resources can respond accordingly.
+                            // TODO Should this be removed after the call to resource_redirect()?
                             addKeyVal(&input->condInput, IN_REPL_KW, "");
 
                             rodsServerHost_t* host = nullptr;
                             int local = LOCAL_HOST;
 
-                            if (const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, input, hierarchy, host, local);
-                                !err.ok())
-                            {
+                            const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, input, hierarchy, host, local);
+
+                            if (!err.ok()) {
                                 log::rule_engine::error("Could not resolve resource hierarchy [error => {}, error code => {}]",
                                                         err.result(), err.code());
                                 THROW(err.code(), err.result());
                             }
+
+                            // We've resolved the redirect and have a host, set the hierarchy string for
+                            // subsequent API calls, etc.
+                            addKeyVal(&input->condInput, RESC_HIER_STR_KW, hierarchy.data());
                         }
                         else {
                             hierarchy = hier;
                         }
 
                         rodsLong_t resource_id;
+
                         if (const auto err = resc_mgr.hier_to_leaf_id(hierarchy, resource_id); !err.ok()) {
                             log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
                                                     err.result(), err.code());
@@ -346,63 +351,7 @@ namespace
                         return std::make_tuple(util::get_replica_number(conn, input->objPath, resource_id),
                                                std::to_string(resource_id));
                     }();
-#else
-                    const auto [replica_number, resource_id] = [&conn, input] {
-                        if (const auto* value = getValByKey(&input->condInput, REPL_NUM_KW); value) {
-                            const auto replica_number = std::stoi(value);
-                            const auto resource_id = util::get_resource_id(conn, input->objPath, replica_number);
-                            return std::make_tuple(replica_number, resource_id);
-                        }
-                        else if (const auto* value = getValByKey(&input->condInput, RESC_NAME_KW); value) {
-                            log::rule_engine::debug("HARD-LINKS :: RESOURCE = {}", value);
 
-                            irods::resource_ptr resc_ptr;
-                            if (const auto err = resc_mgr.resolve(value, resc_ptr); !err.ok()) {
-                                log::rule_engine::error("Could not resolve resource [error => {}, error code => {}]",
-                                                        err.result(), err.code());
-                            }
-
-                            rodsLong_t resource_id;
-                            if (const auto err = resc_ptr->get_property(irods::RESOURCE_ID, resource_id); !err.ok()) {
-                                log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
-                                                        err.result(), err.code());
-                            }
-
-                            log::rule_engine::debug("HARD-LINKS :: RESOURCE ID = {}", resource_id);
-
-                            const auto replica_number = util::get_replica_number(conn, input->objPath, resource_id);
-
-                            return std::make_tuple(replica_number, std::to_string(resource_id));
-                        }
-
-                        /*
-                        if (const auto* value = getValByKey(&input->condInput, DEF_RESC_NAME_KW); value) {
-                            log::rule_engine::debug("HARD-LINKS :: DEFAULT RESOURCE = {}", value);
-                        }
-
-                        if (const auto* value = getValByKey(&input->condInput, DEST_RESC_NAME_KW); value) {
-                            log::rule_engine::debug("HARD-LINKS :: DESTINATION RESOURCE = {}", value);
-                        }
-
-                        if (const auto* value = getValByKey(&input->condInput, BACKUP_RESC_NAME_KW); value) {
-                            log::rule_engine::debug("HARD-LINKS :: BACKUP RESOURCE = {}", value);
-                        }
-
-                        if (const auto* value = getValByKey(&input->condInput, RESC_HIER_STR_KW); value) {
-                            log::rule_engine::debug("HARD-LINKS :: RESOURCE HIER = {}", value);
-                        }
-                        */
-
-                        // TODO Handle resource hierarchies.
-                        // hier -> replica number
-                        // RESC_NAME / RESC_ID
-
-                        // Leave a useful comment.
-                        // FIXME Replica zero may not be available because it was trimmed.
-                        // Throw an error!!!!!!
-                        THROW(USER_INVALID_REPLICA_INPUT, "");
-                    }();
-#endif
                     auto links = util::get_links_by_resource_id(conn, *uuid, resource_id);
 
                     const auto number_of_replicas_to_keep = [input] {

@@ -129,13 +129,10 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 3)
             self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
 
-            # TODO Remove once this passes.
-            self.admin.assert_icommand(['ils', '-L'], 'STDOUT', [' '])
-
             # Trim the replica that is shared between three logical paths.
             self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_b], 'STDOUT', ['trimmed'])
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 2)
-            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 2)
+            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
 
             # Trim the replica that is shared between two logical paths.
             # This will cause all hard-link metadata to be removed because there are zero replicas
@@ -144,6 +141,12 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 0)
             self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 0)
 
+            # Verify that the metadata has been removed.
+            for path in [data_object, hard_link_a]:
+                self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', ['None'])
+
+            # Clean-up.
+            self.admin.assert_icommand(['irm', '-f', data_object, hard_link_a])
             self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
