@@ -164,6 +164,55 @@ namespace
                                                  p.c_str(), resource_id)};
         }
 
+        auto get_replica_number_and_resource_id(rsComm_t& conn, dataObjInp_t& input) -> std::tuple<int, std::string>
+        {
+            std::string hierarchy;
+
+            if (const auto* hier = getValByKey(&input.condInput, RESC_HIER_STR_KW); !hier) {
+                // Set a repl keyword so resources can respond accordingly.
+                // TODO Should this be removed after the call to resource_redirect()?
+                addKeyVal(&input.condInput, IN_REPL_KW, "");
+
+                rodsServerHost_t* host = nullptr;
+                int local = LOCAL_HOST;
+
+                const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, &input, hierarchy, host, local);
+
+                if (!err.ok()) {
+                    log::rule_engine::error("Could not resolve resource hierarchy [error => {}, error code => {}]",
+                                            err.result(), err.code());
+                    THROW(err.code(), err.result());
+                }
+
+                // We've resolved the redirect and have a host, set the hierarchy string for
+                // subsequent API calls, etc.
+                addKeyVal(&input.condInput, RESC_HIER_STR_KW, hierarchy.data());
+            }
+            else {
+                hierarchy = hier;
+            }
+
+            rodsLong_t resource_id;
+
+            if (const auto err = resc_mgr.hier_to_leaf_id(hierarchy, resource_id); !err.ok()) {
+                log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
+                                        err.result(), err.code());
+                THROW(err.code(), err.result());
+            }
+
+            return std::make_tuple(util::get_replica_number(conn, input.objPath, resource_id),
+                                   std::to_string(resource_id));
+        }
+
+        auto get_number_of_replicas_to_keep(const dataObjInp_t& input) -> int
+        {
+            if (const auto* value = getValByKey(&input.condInput, COPIES_KW); value) {
+                return std::stoi(value);
+            }
+
+            return DEF_MIN_COPY_CNT;
+        }
+
         auto set_logical_path(rsComm_t& conn, const fs::path& logical_path, const fs::path& new_logical_path) -> int
         {
             dataObjInfo_t info{};
@@ -288,53 +337,9 @@ namespace
                 auto& conn = *util::get_rei(effect_handler).rsComm;
 
                 if (const auto uuid = util::get_uuid(conn, input->objPath); uuid) {
-                    const auto [replica_number, resource_id] = [&conn, input] {
-                        std::string hierarchy;
-
-                        if (const auto* hier = getValByKey(&input->condInput, RESC_HIER_STR_KW); !hier) {
-                            // Set a repl keyword so resources can respond accordingly.
-                            // TODO Should this be removed after the call to resource_redirect()?
-                            addKeyVal(&input->condInput, IN_REPL_KW, "");
-
-                            rodsServerHost_t* host = nullptr;
-                            int local = LOCAL_HOST;
-
-                            const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, input, hierarchy, host, local);
-
-                            if (!err.ok()) {
-                                log::rule_engine::error("Could not resolve resource hierarchy [error => {}, error code => {}]",
-                                                        err.result(), err.code());
-                                THROW(err.code(), err.result());
-                            }
-
-                            // We've resolved the redirect and have a host, set the hierarchy string for
-                            // subsequent API calls, etc.
-                            addKeyVal(&input->condInput, RESC_HIER_STR_KW, hierarchy.data());
-                        }
-                        else {
-                            hierarchy = hier;
-                        }
-
-                        rodsLong_t resource_id;
-
-                        if (const auto err = resc_mgr.hier_to_leaf_id(hierarchy, resource_id); !err.ok()) {
-                            log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
-                                                    err.result(), err.code());
-                        }
-
-                        return std::make_tuple(util::get_replica_number(conn, input->objPath, resource_id),
-                                               std::to_string(resource_id));
-                    }();
-
-                    auto links = util::get_links_by_resource_id(conn, *uuid, resource_id);
-
-                    const auto number_of_replicas_to_keep = [input] {
-                        if (const auto* value = getValByKey(&input->condInput, COPIES_KW); value) {
-                            return std::stoi(value);
-                        }
-
-                        return DEF_MIN_COPY_CNT;
-                    }();
+                    const auto [replica_number, resource_id] = util::get_replica_number_and_resource_id(conn, *input);
+                    const auto number_of_replicas_to_keep = util::get_number_of_replicas_to_keep(*input);
+                    const auto links = util::get_links_by_resource_id(conn, *uuid, resource_id);
 
                     if (links.size() > 1 && links.size() > number_of_replicas_to_keep) {
                         log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
