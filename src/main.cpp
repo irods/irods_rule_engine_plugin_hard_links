@@ -115,22 +115,6 @@ namespace
             return data_objects;
         }
 
-        auto get_sibling_data_objects(rsComm_t& conn, const fs::path& p) -> std::vector<fs::path>
-        {
-            const auto uuid = get_uuid(conn, p);
-
-            if (!uuid) {
-                return {};
-            }
-
-            auto data_objects = get_data_objects(conn, *uuid);
-            auto end = std::end(data_objects);
-
-            data_objects.erase(std::remove(std::begin(data_objects), end, p), end);
-
-            return data_objects;
-        }
-
         auto get_data_object_info(rsComm_t& conn, const fs::path& p) -> std::vector<data_object_info>
         {
             const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM, RESC_NAME, RESC_ID where COLL_NAME = '{}' and DATA_NAME = '{}'",
@@ -144,19 +128,6 @@ namespace
             }
 
             return info;
-        }
-
-        auto get_links_to_physical_path(rsComm_t& conn, const fs::path& p) -> std::vector<fs::path>
-        {
-            const auto gql = fmt::format("select COLL_NAME, DATA_NAME where DATA_PATH = '{}' and META_DATA_ATTR_NAME = 'irods::hard_link'", p.c_str());
-
-            std::vector<fs::path> links;
-
-            for (auto&& row : irods::query{&conn, gql}) {
-                links.push_back(fs::path{row[0]} / row[1]);
-            }
-
-            return links;
         }
 
         auto get_links_by_resource_id(rsComm_t& conn,
@@ -178,37 +149,6 @@ namespace
             return links;
         }
 
-        auto get_physical_path(rsComm_t& conn, const fs::path& p, int replica_number = 0) -> std::string
-        {
-            const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}'",
-                                         p.parent_path().c_str(),
-                                         p.object_name().c_str());
-
-            for (auto&& row : irods::query{&conn, gql}) {
-                if (std::stoi(row[1]) == replica_number) {
-                    return row[0];
-                }
-            }
-
-            throw std::runtime_error{fmt::format("Could not retrieve physical path for [{}]", p.c_str())};
-        }
-
-        auto get_resource_id(rsComm_t& conn, const fs::path& p, int replica_number = 0) -> std::string
-        {
-            const auto gql = fmt::format("select RESC_ID, DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}'",
-                                         p.parent_path().c_str(),
-                                         p.object_name().c_str());
-
-            for (auto&& row : irods::query{&conn, gql}) {
-                if (std::stoi(row[1]) == replica_number) {
-                    return row[0];
-                }
-            }
-
-            throw std::runtime_error{fmt::format("Could not retrieve resource id for [path => {}, replica_number = {}]",
-                                                 p.c_str(), replica_number)};
-        }
-
         auto get_replica_number(rsComm_t& conn, const fs::path& p, rodsLong_t resource_id) -> int
         {
             const auto gql = fmt::format("select DATA_REPL_NUM where COLL_NAME = '{}' and DATA_NAME = '{}' and RESC_ID = '{}'",
@@ -224,29 +164,40 @@ namespace
                                                  p.c_str(), resource_id)};
         }
 
-        auto set_physical_path(rsComm_t& conn, const fs::path& logical_path, const fs::path& physical_path) -> int
+        auto set_logical_path(rsComm_t& conn, const fs::path& logical_path, const fs::path& new_logical_path) -> int
         {
             dataObjInfo_t info{};
             rstrcpy(info.objPath, logical_path.c_str(), MAX_NAME_LEN);
 
             keyValPair_t reg_params{};
-            addKeyVal(&reg_params, FILE_PATH_KW, physical_path.c_str());
-
-            modDataObjMeta_t input{};
-            input.dataObjInfo = &info;
-            input.regParam = &reg_params;
-
-            return rsModDataObjMeta(&conn, &input);
-        }
-
-        auto set_data_name(rsComm_t& conn, const fs::path& logical_path, const fs::path& data_name) -> int
-        {
-            dataObjInfo_t info{};
-            rstrcpy(info.objPath, logical_path.c_str(), MAX_NAME_LEN);
-
-            keyValPair_t reg_params{};
-            addKeyVal(&reg_params, DATA_NAME_KW, data_name.c_str());
             addKeyVal(&reg_params, ALL_KW, "");
+
+            // Update the data name if the names are different.
+            if (const auto object_name = new_logical_path.object_name(); logical_path.object_name() != object_name) {
+                addKeyVal(&reg_params, DATA_NAME_KW, object_name.c_str());
+            }
+
+            // Update the collection id if the parent paths are different.
+            // (i.e. the data object is moving between collections)
+            if (const auto collection = new_logical_path.parent_path(); logical_path.parent_path() != collection) {
+                if (!fs::server::is_collection(conn, collection)) {
+                    log::rule_engine::error("Path is not a collection or does not exist [path => {}]", collection.c_str());
+                    return OBJ_PATH_DOES_NOT_EXIST;
+                }
+
+                std::string collection_id;
+
+                for (auto&& row : irods::query{&conn, fmt::format("select COLL_ID where COLL_NAME = '{}'", collection.c_str())}) {
+                    collection_id = row[0];
+                }
+
+                if (collection_id.empty()) {
+                    log::rule_engine::error("Could not get collection id for [path => {}]", collection.c_str());
+                    return SYS_INTERNAL_ERR;
+                }
+
+                addKeyVal(&reg_params, COLL_ID_KW, collection_id.c_str());
+            }
 
             modDataObjMeta_t input{};
             input.dataObjInfo = &info;
@@ -269,13 +220,13 @@ namespace
                 auto& conn = *util::get_rei(effect_handler).rsComm;
                 const fs::path src_path = input->srcDataObjInp.objPath;
 
-                // If the path is part of a hard-link group, then update the data name and
+                // If the path is part of a hard-link group, then update the logical path and
                 // skip the actual rename operation. Else, do nothing and continue to the next REP.
                 if (util::get_uuid(conn, src_path)) {
                     const fs::path dst_path = input->destDataObjInp.objPath;
 
-                    if (const auto ec = util::set_data_name(conn, src_path, dst_path.object_name()); ec < 0) {
-                        const auto msg = fmt::format("Could not update the data name of [{}] to [{}]. "
+                    if (const auto ec = util::set_logical_path(conn, src_path, dst_path); ec < 0) {
+                        const auto msg = fmt::format("Could not set the logical path of [{}] to [{}]. "
                                                      "Use iadmin modrepl to update data object.",
                                                      src_path.c_str(),
                                                      dst_path.c_str());
@@ -285,52 +236,6 @@ namespace
 
                     return CODE(RULE_ENGINE_SKIP_OPERATION);
                 }
-            }
-            catch (const std::exception& e) {
-                util::log_exception_message(e.what(), effect_handler);
-                return ERROR(RE_RUNTIME_ERROR, e.what());
-            }
-
-            return CODE(RULE_ENGINE_CONTINUE);
-        }
-
-        auto pep_api_data_obj_rename_post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
-        {
-            try {
-                auto* input = util::get_input_object_ptr<dataObjCopyInp_t>(rule_arguments);
-                auto& conn = *util::get_rei(effect_handler).rsComm;
-#if 1
-                const auto data_name = fs::path{input->destDataObjInp.objPath}.object_name();
-
-                for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
-                    // Update the DATA_NAME instead of the physical path.
-                    // Hard-Links aren't allowed to update the physical path, only the logical path.
-                    if (const auto ec = util::set_data_name(conn, sibling, data_name); ec < 0) {
-                        const auto msg = fmt::format("Could not update the data name of [{}] to [{}]. "
-                                                     "Use iadmin modrepl to update remaining data objects.",
-                                                     input->destDataObjInp.objPath,
-                                                     sibling.c_str());
-                        log::rule_engine::error(msg);
-                        addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, ec, msg.data());
-                    }
-                }
-#else
-                const auto physical_path = util::get_physical_path(conn, input->destDataObjInp.objPath);
-
-                for (auto&& sibling : util::get_sibling_data_objects(conn, input->destDataObjInp.objPath)) {
-                    // TODO Update the DATA_NAME instead of the physical path.
-                    // Hard-Links aren't allowed to update the physical path, only the logical path.
-                    // Must take the replica number into account, else the REP may update the wrong replica.
-                    if (const auto ec = util::set_physical_path(conn, sibling, physical_path); ec < 0) {
-                        log::rule_engine::error("Could not update physical path of [{}] to [{}]. "
-                                                "Use iadmin modrepl to update remaining data objects.",
-                                                input->destDataObjInp.objPath,
-                                                sibling.c_str());
-
-                        addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, RE_RUNTIME_ERROR, "");
-                    }
-                }
-#endif
             }
             catch (const std::exception& e) {
                 util::log_exception_message(e.what(), effect_handler);
@@ -574,7 +479,6 @@ namespace
     using handler_map_type = std::map<std::string_view, handler_type>;
 
     const handler_map_type pep_handlers{
-        //{"pep_api_data_obj_rename_post", handler::pep_api_data_obj_rename_post},
         {"pep_api_data_obj_rename_pre",  handler::pep_api_data_obj_rename_pre},
         {"pep_api_data_obj_unlink_pre",  handler::pep_api_data_obj_unlink_pre},
         {"pep_api_data_obj_trim_pre",    handler::pep_api_data_obj_trim_pre}
@@ -583,8 +487,8 @@ namespace
     // TODO Could expose these as a new .so. The .so would then be loaded by the new "irods" cli.
     // Then we get things like: irods ln <args>...
     const handler_map_type hard_link_handlers{
-        {"hard_links_count_links", {}},
-        {"hard_links_list_data_objects", {}},
+        //{"hard_links_count_links", {}},
+        //{"hard_links_list_data_objects", {}},
         {"hard_links_create", handler::make_hard_link}
     };
     // clang-format on
