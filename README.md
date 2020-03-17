@@ -1,14 +1,14 @@
 # iRODS Rule Engine Plugin - Hard Links
 
-This plugin brings iRODS closer to POSIX semantics by enabling iRODS to automatically update the mtimes for
-collections when changes are detected within them.
+Adds hard-link support to iRODS.
 
 ## Requirements
 - iRODS v4.3.0+
+- irods-dev package
 - irods-externals-boost package
+- irods-externals-fmt package
 - irods-externals-json package
 - irods-externals-spdlog package
-- irods-dev package
 - irods-runtime package
 
 ## Compiling
