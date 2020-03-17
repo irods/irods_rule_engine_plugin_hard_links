@@ -202,8 +202,19 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
             self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
 
+            # Move the original data object to a new collection and show that only the logical
+            # paths are updated. The physical paths do not change even when moving data objects to
+            # different collections.
+            collection = 'col.d'
+            self.admin.assert_icommand(['imkdir', collection])
+            new_name = os.path.join(collection, data_object)
+            self.admin.assert_icommand(['imv', data_object, new_name])
+            data_object = new_name
+            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
+            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
+
             # Clean-up.
-            self.admin.assert_icommand(['irm', '-f', data_object, hard_link])
+            self.admin.assert_icommand(['irm', '-rf', data_object, hard_link])
             self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
 
     def enable_hard_links_rule_engine_plugin(self, config):

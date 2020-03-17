@@ -170,7 +170,7 @@ namespace
             rstrcpy(info.objPath, logical_path.c_str(), MAX_NAME_LEN);
 
             keyValPair_t reg_params{};
-            addKeyVal(&reg_params, ALL_KW, "");
+            addKeyVal(&reg_params, ALL_KW, ""); // Update all replicas!
 
             // Update the data name if the names are different.
             if (const auto object_name = new_logical_path.object_name(); logical_path.object_name() != object_name) {
