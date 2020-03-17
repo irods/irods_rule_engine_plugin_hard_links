@@ -157,15 +157,21 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.enable_hard_links_rule_engine_plugin(config)
 
             # Put a file: foo
+            # Capture the physical path for verification.
             data_object = 'foo'
             file_path = os.path.join(self.admin.local_session_dir, data_object)
             lib.make_file(file_path, 1024, 'arbitrary')
             self.admin.assert_icommand(['iput', file_path])
             data_object = os.path.join(self.admin.session_collection, data_object)
+            data_object_physical_path = self.get_physical_path(data_object)
+            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path])
 
             # Create a hard-link to the data object previously put into iRODS.
+            # Capture the physical path for verification.
             hard_link = os.path.join(self.admin.session_collection, 'foo.0')
             self.make_hard_link(data_object, 0, hard_link)
+            hard_link_physical_path = self.get_physical_path(data_object)
+            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [hard_link_physical_path])
 
             # Create new resource.
             vault_name = 'other_resc_vault'
@@ -176,23 +182,25 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault], 'STDOUT', [other_resc])
 
             # Replicate the data object to the new resource.
+            # Capture the physical path for verification.
             self.admin.assert_icommand(['irepl', '-R', other_resc, data_object])
+            replica_physical_path = self.get_physical_path(data_object, replica_number=1)
+            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [replica_physical_path])
 
-            # Rename the original data object and verify that all data objects
-            # point to the same replica.
+            # Rename the original data object and show that only the logical path changed.
+            # Hard-Links never modify the physical path of any data objects.
             new_name = 'bar'
             self.admin.assert_icommand(['imv', data_object, new_name])
-            number_of_data_objects_with_same_physical_path = '3'
-            gql = "select count(DATA_PATH) where DATA_PATH like '%/" + new_name + "'"
-            self.admin.assert_icommand(['iquest', '%s', gql], 'STDOUT', ['3'])
             data_object = new_name
+            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
+            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
 
             # Rename the hard-link and verify that all data objects point to the same replica.
             new_name = 'baz'
             self.admin.assert_icommand(['imv', hard_link, new_name])
-            gql = "select count(DATA_PATH) where DATA_PATH like '%/" + new_name + "'"
-            self.admin.assert_icommand(['iquest', '%s', gql], 'STDOUT', ['2'])
             hard_link = new_name
+            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
+            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
 
             # Clean-up.
             self.admin.assert_icommand(['irm', '-f', data_object, hard_link])
@@ -223,14 +231,16 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         return str(utf8_query_result_string).strip()
 
     def get_resource_id(self, data_object, replica_number=0):
-        gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
+        #gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
+        gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
         utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
         return str(utf8_query_result_string).strip()
 
     def get_physical_path(self, data_object, replica_number=0):
-        gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
+        #gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
+        gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
         utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
