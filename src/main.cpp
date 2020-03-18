@@ -74,6 +74,23 @@ namespace
             return *rei;
         }
 
+        template <typename Function>
+        auto sudo(rsComm_t& conn, Function _func) -> decltype(_func())
+        {
+            auto& auth_flag = conn.clientUser.authInfo.authFlag;
+            const auto old_auth_flag = auth_flag;
+
+            // Elevate privileges.
+            auth_flag = LOCAL_PRIV_USER_AUTH;
+
+            // Restore authorization flags on exit.
+            irods::at_scope_exit<std::function<void()>> at_scope_exit{
+                [&auth_flag, old_auth_flag] { auth_flag = old_auth_flag; }
+            };
+
+            return _func();
+        }
+
         auto log_exception_message(const char* msg, irods::callback& effect_handler) -> void
         {
             log::rule_engine::error(msg);
@@ -88,8 +105,11 @@ namespace
 
         auto get_uuid(rsComm_t& conn, const fs::path& p) -> std::optional<std::string>
         {
-            const auto gql = fmt::format("select META_DATA_ATTR_VALUE where COLL_NAME = '{}' and "
-                                         "DATA_NAME = '{}' and META_DATA_ATTR_NAME = 'irods::hard_link'",
+            const auto gql = fmt::format("select META_DATA_ATTR_VALUE "
+                                         "where"
+                                         " META_DATA_ATTR_NAME = 'irods::hard_link' and"
+                                         " COLL_NAME = '{}' and"
+                                         " DATA_NAME = '{}'",
                                          p.parent_path().c_str(),
                                          p.object_name().c_str());
 
@@ -100,10 +120,34 @@ namespace
             return std::nullopt;
         }
 
+        auto get_existing_or_generate_uuid(rsComm_t& conn, const fs::path& logical_path) -> std::tuple<bool, std::string>
+        {
+            // If a UUID has already been assigned to the source logical path, then return that.
+            if (const auto uuid = util::get_uuid(conn, logical_path); uuid) {
+                return std::make_tuple(false, *uuid);
+            }
+
+            // Generate an unused UUID and return it.
+
+            auto uuid = to_string(boost::uuids::random_generator{}());
+            const auto* query = "select count(DATA_NAME) "
+                                "where"
+                                " META_DATA_ATTR_NAME = 'irods::hard_link' and"
+                                " META_DATA_ATTR_VALUE = '{}'";
+
+            for (auto&& row : irods::query{&conn, fmt::format(query, uuid)}) {
+                uuid = to_string(boost::uuids::random_generator{}());
+            }
+
+            return std::make_tuple(true, uuid);
+        }
+
         auto get_data_objects(rsComm_t& conn, std::string_view uuid) -> std::vector<fs::path>
         {
-            const auto gql = fmt::format("select COLL_NAME, DATA_NAME where META_DATA_ATTR_NAME = 'irods::hard_link' and "
-                                         "META_DATA_ATTR_VALUE = '{}'",
+            const auto gql = fmt::format("select COLL_NAME, DATA_NAME "
+                                         "where"
+                                         " META_DATA_ATTR_NAME = 'irods::hard_link' and"
+                                         " META_DATA_ATTR_VALUE = '{}'",
                                          uuid);
 
             std::vector<fs::path> data_objects;
@@ -117,7 +161,8 @@ namespace
 
         auto get_data_object_info(rsComm_t& conn, const fs::path& p) -> std::vector<data_object_info>
         {
-            const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM, RESC_NAME, RESC_ID where COLL_NAME = '{}' and DATA_NAME = '{}'",
+            const auto gql = fmt::format("select DATA_PATH, DATA_REPL_NUM, RESC_NAME, RESC_ID "
+                                         "where COLL_NAME = '{}' and DATA_NAME = '{}'",
                                          p.parent_path().c_str(),
                                          p.object_name().c_str());
 
@@ -136,9 +181,9 @@ namespace
         {
             const auto gql = fmt::format("select COLL_NAME, DATA_NAME "
                                          "where"
+                                         " META_DATA_ATTR_NAME = 'irods::hard_link' and"
                                          " META_DATA_ATTR_VALUE = '{}' and"
-                                         " META_DATA_ATTR_UNITS = '{}' and"
-                                         " META_DATA_ATTR_NAME = 'irods::hard_link'", uuid, resource_id);
+                                         " META_DATA_ATTR_UNITS = '{}'", uuid, resource_id);
 
             std::vector<fs::path> links;
 
@@ -170,7 +215,6 @@ namespace
 
             if (const auto* hier = getValByKey(&input.condInput, RESC_HIER_STR_KW); !hier) {
                 // Set a repl keyword so resources can respond accordingly.
-                // TODO Should this be removed after the call to resource_redirect()?
                 addKeyVal(&input.condInput, IN_REPL_KW, "");
 
                 rodsServerHost_t* host = nullptr;
@@ -303,8 +347,6 @@ namespace
                 // Unregister the data object.
                 // Hard-links do NOT appear in the trash.
                 if (const auto uuid = util::get_uuid(conn, input->objPath); uuid && util::get_data_objects(conn, *uuid).size() > 1) {
-                    log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
-
                     dataObjInp_t unreg_input{};
                     unreg_input.oprType = UNREG_OPR;
                     rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
@@ -315,12 +357,8 @@ namespace
                         return ERROR(ec, "Hard-Link removal error");
                     }
 
-                    log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation.", input->objPath);
-
                     return CODE(RULE_ENGINE_SKIP_OPERATION);
                 }
-
-                log::rule_engine::trace("Removing data object ...");
             }
             catch (const std::exception& e) {
                 util::log_exception_message(e.what(), effect_handler);
@@ -342,8 +380,6 @@ namespace
                     const auto links = util::get_links_by_resource_id(conn, *uuid, resource_id);
 
                     if (links.size() > 1 && links.size() > number_of_replicas_to_keep) {
-                        log::rule_engine::trace("Removing hard-link [{}] ...", input->objPath);
-
                         dataObjInp_t unreg_input{};
                         unreg_input.oprType = UNREG_OPR;
                         rstrcpy(unreg_input.objPath, input->objPath, MAX_NAME_LEN);
@@ -355,14 +391,11 @@ namespace
                             return ERROR(ec, "Hard-Link removal error");
                         }
 
-                        log::rule_engine::trace("Successfully removed hard-link [{}]. Skipping operation ...", input->objPath);
-
                         // If the number of links was two before unregistering the replica, then we
                         // now have one link left (which doesn't make sense). Therefore, the server needs
                         // to delete the hard-link metadata attached to the data object.
                         if (links.size() == 2) {
                             for (auto&& l : links) {
-                                log::rule_engine::trace("link = {}", l.c_str());
                                 fs::server::remove_metadata(conn, l, {"irods::hard_link", *uuid, resource_id});
                             }
                         }
@@ -419,42 +452,34 @@ namespace
                 }();
 
                 // Register the new logical path.
-                dataObjInp_t input{};
-                addKeyVal(&input.condInput, FILE_PATH_KW, info.physical_path.data());
-                addKeyVal(&input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
-                rstrcpy(input.objPath, link_name.data(), MAX_NAME_LEN);
+                {
+                    dataObjInp_t input{};
+                    addKeyVal(&input.condInput, FILE_PATH_KW, info.physical_path.data());
+                    addKeyVal(&input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
+                    rstrcpy(input.objPath, link_name.data(), MAX_NAME_LEN);
 
-                if (const auto ec = rsPhyPathReg(&conn, &input); ec < 0) {
-                    log::rule_engine::error("Could not make hard-link [ec = {}, physical_path = {}, link_name = {}]", ec, info.physical_path, link_name);
-                    return ERROR(ec, "Could not register physical path as a data object");
+                    // Vanilla iRODS only allows administrators to register data objects.
+                    // Elevate privileges so that all users can create hard-links.
+                    const auto ec = util::sudo(conn, [&conn, &input] {
+                        return rsPhyPathReg(&conn, &input);
+                    });
+
+                    if (ec < 0) {
+                        log::rule_engine::error("Could not make hard-link [ec = {}, physical_path = {}, link_name = {}]",
+                                                ec, info.physical_path, link_name);
+                        return ERROR(ec, "Could not register physical path as a data object");
+                    }
                 }
 
-                log::rule_engine::trace("Successfully registered data object [logical_path = {}, physical_path = {}]", logical_path.data(), info.physical_path.data());
-
-                const auto uuid = [&conn, &logical_path] {
-                    // If a UUID has already been assigned to the source logical path, then return that.
-                    if (const auto uuid = util::get_uuid(conn, logical_path); uuid) {
-                        return std::make_tuple(false, *uuid);
-                    }
-
-                    // Generate an unused UUID and return it.
-                    auto uuid = to_string(boost::uuids::random_generator{}());
-                    auto gql = fmt::format("select COUNT(DATA_NAME) where META_DATA_ATTR_NAME = 'irods::hard_link' and META_DATA_ATTR_VALUE = '{}'", uuid);
-
-                    for (auto&& row : irods::query{&conn, gql}) {
-                        log::rule_engine::trace("UUID [{}] already in use. Generating new UUID ...", uuid);
-                        uuid = to_string(boost::uuids::random_generator{}());
-                        gql = fmt::format("select COUNT(DATA_NAME) where META_DATA_ATTR_NAME = 'irods::hard_link' and META_DATA_ATTR_VALUE = '{}'", uuid);
-                    }
-
-                    return std::make_tuple(true, uuid);
-                }();
+                const auto [generated_new_uuid, uuid] = util::get_existing_or_generate_uuid(conn, logical_path);
 
                 try {
-                    fs::server::set_metadata(conn, link_name, {"irods::hard_link", std::get<std::string>(uuid), info.resource_id});
+                    // Set hard-link metadata on new the data object (the hard-linked data object).
+                    fs::server::set_metadata(conn, link_name, {"irods::hard_link", uuid, info.resource_id});
 
-                    if (const auto& [new_uuid, uuid_value] = uuid; new_uuid) {
-                        fs::server::set_metadata(conn, logical_path, {"irods::hard_link", uuid_value, info.resource_id});
+                    // Set hard-link metadata on source data object if the uuid is new.
+                    if (generated_new_uuid) {
+                        fs::server::set_metadata(conn, logical_path, {"irods::hard_link", uuid, info.resource_id});
                     }
                 }
                 catch (const fs::filesystem_error& e) {
@@ -492,8 +517,6 @@ namespace
     // TODO Could expose these as a new .so. The .so would then be loaded by the new "irods" cli.
     // Then we get things like: irods ln <args>...
     const handler_map_type hard_link_handlers{
-        //{"hard_links_count_links", {}},
-        //{"hard_links_list_data_objects", {}},
         {"hard_links_create", handler::make_hard_link}
     };
     // clang-format on
