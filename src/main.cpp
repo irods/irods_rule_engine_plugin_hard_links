@@ -1,3 +1,4 @@
+#include <irods/filesystem/filesystem.hpp>
 #include <irods/filesystem/filesystem_error.hpp>
 #include <irods/irods_plugin_context.hpp>
 #include <irods/irods_re_plugin.hpp>
@@ -205,7 +206,7 @@ namespace
                 return std::stoi(row[0]);
             }
 
-            throw std::runtime_error{fmt::format("Could not retrieve replica number for [path => {}, resource_id => {}]",
+            throw std::runtime_error{fmt::format("Could not retrieve replica number for [path = {}, resource_id = {}]",
                                                  p.c_str(), resource_id)};
         }
 
@@ -223,7 +224,7 @@ namespace
                 const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, &input, hierarchy, host, local);
 
                 if (!err.ok()) {
-                    log::rule_engine::error("Could not resolve resource hierarchy [error => {}, error code => {}]",
+                    log::rule_engine::error("Could not resolve resource hierarchy [error = {}, error code = {}]",
                                             err.result(), err.code());
                     THROW(err.code(), err.result());
                 }
@@ -239,7 +240,7 @@ namespace
             rodsLong_t resource_id;
 
             if (const auto err = resc_mgr.hier_to_leaf_id(hierarchy, resource_id); !err.ok()) {
-                log::rule_engine::error("Could not get resource id [error => {}, error code => {}]",
+                log::rule_engine::error("Could not get resource id [error = {}, error code = {}]",
                                         err.result(), err.code());
                 THROW(err.code(), err.result());
             }
@@ -274,7 +275,7 @@ namespace
             // (i.e. the data object is moving between collections)
             if (const auto collection = new_logical_path.parent_path(); logical_path.parent_path() != collection) {
                 if (!fs::server::is_collection(conn, collection)) {
-                    log::rule_engine::error("Path is not a collection or does not exist [path => {}]", collection.c_str());
+                    log::rule_engine::error("Path is not a collection or does not exist [path = {}]", collection.c_str());
                     return OBJ_PATH_DOES_NOT_EXIST;
                 }
 
@@ -285,7 +286,7 @@ namespace
                 }
 
                 if (collection_id.empty()) {
-                    log::rule_engine::error("Could not get collection id for [path => {}]", collection.c_str());
+                    log::rule_engine::error("Could not get collection id for [path = {}]", collection.c_str());
                     return SYS_INTERNAL_ERR;
                 }
 
@@ -465,7 +466,7 @@ namespace
                     });
 
                     if (ec < 0) {
-                        log::rule_engine::error("Could not make hard-link [ec = {}, physical_path = {}, link_name = {}]",
+                        log::rule_engine::error("Could not make hard-link [error code = {}, physical_path = {}, link_name = {}]",
                                                 ec, info.physical_path, link_name);
                         return ERROR(ec, "Could not register physical path as a data object");
                     }
@@ -481,9 +482,15 @@ namespace
                     if (generated_new_uuid) {
                         fs::server::set_metadata(conn, logical_path, {"irods::hard_link", uuid, info.resource_id});
                     }
+
+                    // Copy permissions to the hard-link.
+                    const auto status = fs::server::status(conn, logical_path);
+                    for (auto&& e : status.permissions()) {
+                        fs::server::permissions(conn, link_name, e.name, e.prms);
+                    }
                 }
                 catch (const fs::filesystem_error& e) {
-                    log::rule_engine::error("Could not set hard-link metadata [msg = {}, ec = {}]", e.what(), e.code().value());
+                    log::rule_engine::error("{} [error code = {}]", e.what(), e.code().value());
                     return ERROR(e.code().value(), e.what());
                 }
             }

@@ -19,11 +19,15 @@ from .. import lib
 from .. import paths
 from ..configuration import IrodsConfig
 
-class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrods', 'rods')], []), unittest.TestCase):
+admins = [('otherrods', 'rods')]
+users  = [('alice', 'rods')]
+
+class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, users), unittest.TestCase):
 
     def setUp(self):
         super(Test_Rule_Engine_Plugin_Hard_Links, self).setUp()
         self.admin = self.admin_sessions[0]
+        self.user = self.user_sessions[0]
 
     def tearDown(self):
         super(Test_Rule_Engine_Plugin_Hard_Links, self).tearDown()
@@ -217,6 +221,74 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
             self.admin.assert_icommand(['irm', '-rf', data_object, hard_link])
             self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
 
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_moving_data_object_without_hard_links_invokes_existing_behavior(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Put a file: foo
+            # Capture the physical path for verification.
+            data_object = 'foo'
+            file_path = os.path.join(self.admin.local_session_dir, data_object)
+            lib.make_file(file_path, 1024, 'arbitrary')
+            self.admin.assert_icommand(['iput', file_path])
+            data_object = os.path.join(self.admin.session_collection, data_object)
+            data_object_physical_path = self.get_physical_path(data_object)
+
+            # Create a new collection.
+            collection = os.path.join(self.admin.session_collection, 'test.d')
+            self.admin.assert_icommand(['imkdir', collection])
+
+            # Moving the data object under the new collection will cause the physical path to change.
+            # This is the default behavior for a unixfilesystem resource.
+            new_name = os.path.join(collection, os.path.basename(data_object))
+            self.admin.assert_icommand(['imv', data_object, new_name])
+            data_object = new_name
+            new_data_object_physical_path = self.get_physical_path(data_object)
+            self.assertTrue(new_data_object_physical_path != data_object_physical_path)
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_renaming_hard_links_maintains_permissions(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Put a file: foo
+            data_object = os.path.join(self.admin.session_collection, 'foo')
+            contents = 'Did it work!?'
+            self.admin.assert_icommand(['istream', 'write', data_object], input=contents)
+            self.admin.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
+
+            # Give user permission to read the data object.
+            self.admin.assert_icommand(['ichmod', 'read', self.user.username, self.admin.session_collection, data_object])
+            expected_permissions = [self.make_perm_string(self.admin, 'own'), self.make_perm_string(self.user, 'read object')]
+            self.admin.assert_icommand(['ils', '-A', self.admin.session_collection], 'STDOUT', expected_permissions)
+            self.admin.assert_icommand(['ils', '-A', data_object], 'STDOUT', expected_permissions)
+            self.user.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
+
+            # Create a hard-link to the data object previously put into iRODS.
+            # Capture the physical path for verification.
+            hard_link = os.path.join(self.admin.session_collection, 'foo.0')
+            self.make_hard_link(data_object, 0, hard_link)
+
+            # Simulate the behavior of WinSCP when opening a data object via Vim through NFSRODS.
+            # 1. Rename the hard-link to the data object's name.
+            new_name = data_object + '.old'
+            self.admin.assert_icommand(['imv', data_object, new_name])
+            self.admin.assert_icommand(['imv', hard_link, data_object])
+            # 2. Remove the original data object.
+            hard_link = data_object
+            data_object = new_name
+            self.admin.assert_icommand(['irm', '-f', data_object])
+            # 3. Verify that the permissions have been maintained.
+            data_object = hard_link
+            self.admin.assert_icommand(['ils', '-A', data_object], 'STDOUT', expected_permissions)
+            self.admin.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
+            self.user.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
+
     def enable_hard_links_rule_engine_plugin(self, config):
         config.server_config['plugin_configuration']['rule_engines'].insert(0, {
             'instance_name': 'irods_rule_engine_plugin-hard_links-instance',
@@ -234,6 +306,9 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         })
         self.admin.assert_icommand(['irule', '-r', 'irods_rule_engine_plugin-hard_links-instance', hard_link_op, 'null', 'ruleExecOut'])
 
+    def make_perm_string(self, user, permission):
+        return user.username + '#' + user.zone_name + ':' + permission
+
     def get_uuid(self, data_object, replica_number=0):
         gql = "select META_DATA_ATTR_VALUE where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
@@ -242,7 +317,6 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         return str(utf8_query_result_string).strip()
 
     def get_resource_id(self, data_object, replica_number=0):
-        #gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
         gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
@@ -250,7 +324,6 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin([('otherrod
         return str(utf8_query_result_string).strip()
 
     def get_physical_path(self, data_object, replica_number=0):
-        #gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
         gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
