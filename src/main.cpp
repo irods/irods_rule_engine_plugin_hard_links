@@ -1,13 +1,8 @@
-#include <irods/filesystem/filesystem.hpp>
-#include <irods/filesystem/filesystem_error.hpp>
 #include <irods/irods_plugin_context.hpp>
 #include <irods/irods_re_plugin.hpp>
 #include <irods/irods_re_serialization.hpp>
 #include <irods/irods_re_ruleexistshelper.hpp>
-#include <irods/irods_get_l1desc.hpp>
-#include <irods/irods_at_scope_exit.hpp>
 #include <irods/irods_state_table.h>
-#include <irods/modDataObjMeta.h>
 #include <irods/msParam.h>
 #include <irods/objInfo.h>
 #include <irods/rcMisc.h>
@@ -24,6 +19,7 @@
 #include <irods/rsPhyPathReg.hpp>
 #include <irods/irods_resource_manager.hpp>
 #include <irods/irods_resource_redirect.hpp>
+#include <irods/scoped_privileged_client.hpp>
 
 #include "json.hpp"
 #include "fmt/format.h"
@@ -73,23 +69,6 @@ namespace
             }
 
             return *rei;
-        }
-
-        template <typename Function>
-        auto sudo(rsComm_t& conn, Function _func) -> decltype(_func())
-        {
-            auto& auth_flag = conn.clientUser.authInfo.authFlag;
-            const auto old_auth_flag = auth_flag;
-
-            // Elevate privileges.
-            auth_flag = LOCAL_PRIV_USER_AUTH;
-
-            // Restore authorization flags on exit.
-            irods::at_scope_exit<std::function<void()>> at_scope_exit{
-                [&auth_flag, old_auth_flag] { auth_flag = old_auth_flag; }
-            };
-
-            return _func();
         }
 
         auto log_exception_message(const char* msg, irods::callback& effect_handler) -> void
@@ -297,6 +276,8 @@ namespace
             input.dataObjInfo = &info;
             input.regParam = &reg_params;
 
+            irods::experimental::scoped_privileged_client spc{conn};
+
             return rsModDataObjMeta(&conn, &input);
         }
     } // namespace util
@@ -461,11 +442,9 @@ namespace
 
                     // Vanilla iRODS only allows administrators to register data objects.
                     // Elevate privileges so that all users can create hard-links.
-                    const auto ec = util::sudo(conn, [&conn, &input] {
-                        return rsPhyPathReg(&conn, &input);
-                    });
+                    irods::experimental::scoped_privileged_client spc{conn};
 
-                    if (ec < 0) {
+                    if (const auto ec = rsPhyPathReg(&conn, &input); ec < 0) {
                         log::rule_engine::error("Could not make hard-link [error code = {}, physical_path = {}, link_name = {}]",
                                                 ec, info.physical_path, link_name);
                         return ERROR(ec, "Could not register physical path as a data object");
