@@ -540,7 +540,7 @@ namespace
             return (iter->second)(rule_arguments, effect_handler);
         }
 
-        log::rule_engine::error("Rule not supported [{}]", rule_name);
+        log::rule_engine::error("Rule not supported in rule engine plugin [{}]", rule_name);
 
         return CODE(RULE_ENGINE_CONTINUE);
     }
