@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.7.0 FATAL_ERROR)
 
-find_package(IRODS REQUIRED)
+find_package(IRODS 4.2.8 EXACT REQUIRED)
 
 set(IRODS_PLUGIN_REVISION "0")
 

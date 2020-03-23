@@ -3,7 +3,7 @@
 Adds hard-link support to iRODS.
 
 ## Requirements
-- iRODS v4.3.0+
+- iRODS v4.2.8+
 - irods-dev package
 - irods-externals-boost package
 - irods-externals-fmt package
@@ -14,6 +14,7 @@ Adds hard-link support to iRODS.
 ## Compiling
 ```bash
 $ git clone https://github.com/irods/irods_rule_engine_plugin_hard_links
+$ git checkout 4-2-stable
 $ mkdir _build
 $ cd _build
 $ cmake -GNinja ../irods_rule_engine_plugin_hard_links

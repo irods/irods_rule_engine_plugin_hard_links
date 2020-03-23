@@ -10,7 +10,6 @@
 #include <irods/rodsError.h>
 #include <irods/rodsErrorTable.h>
 #include <irods/filesystem.hpp>
-#include <irods/irods_logger.hpp>
 #include <irods/irods_query.hpp>
 #include <irods/rodsType.h>
 #include <irods/rsModDataObjMeta.hpp>
@@ -45,7 +44,6 @@ namespace
     // clang-format off
     namespace fs = irods::experimental::filesystem;
 
-    using log    = irods::experimental::log;
     using json   = nlohmann::json;
     // clang-format on
 
@@ -73,7 +71,7 @@ namespace
 
         auto log_exception_message(const char* msg, irods::callback& effect_handler) -> void
         {
-            log::rule_engine::error(msg);
+            rodsLog(LOG_ERROR, msg);
             addRErrorMsg(&get_rei(effect_handler).rsComm->rError, RE_RUNTIME_ERROR, msg);
         }
 
@@ -203,8 +201,8 @@ namespace
                 const auto err = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, &input, hierarchy, host, local);
 
                 if (!err.ok()) {
-                    log::rule_engine::error("Could not resolve resource hierarchy [error = {}, error code = {}]",
-                                            err.result(), err.code());
+                    rodsLog(LOG_ERROR, "Could not resolve resource hierarchy [error = %s, error code = %d]",
+                            err.result().data(), err.code());
                     THROW(err.code(), err.result());
                 }
 
@@ -219,8 +217,8 @@ namespace
             rodsLong_t resource_id;
 
             if (const auto err = resc_mgr.hier_to_leaf_id(hierarchy, resource_id); !err.ok()) {
-                log::rule_engine::error("Could not get resource id [error = {}, error code = {}]",
-                                        err.result(), err.code());
+                rodsLog(LOG_ERROR, "Could not get resource id [error = %s, error code = %d]",
+                        err.result().data(), err.code());
                 THROW(err.code(), err.result());
             }
 
@@ -254,7 +252,7 @@ namespace
             // (i.e. the data object is moving between collections)
             if (const auto collection = new_logical_path.parent_path(); logical_path.parent_path() != collection) {
                 if (!fs::server::is_collection(conn, collection)) {
-                    log::rule_engine::error("Path is not a collection or does not exist [path = {}]", collection.c_str());
+                    rodsLog(LOG_ERROR, "Path is not a collection or does not exist [path = %s]", collection.c_str());
                     return OBJ_PATH_DOES_NOT_EXIST;
                 }
 
@@ -265,7 +263,7 @@ namespace
                 }
 
                 if (collection_id.empty()) {
-                    log::rule_engine::error("Could not get collection id for [path = {}]", collection.c_str());
+                    rodsLog(LOG_ERROR, "Could not get collection id for [path = %s]", collection.c_str());
                     return SYS_INTERNAL_ERR;
                 }
 
@@ -305,7 +303,7 @@ namespace
                                                      "Use iadmin modrepl to update data object.",
                                                      src_path.c_str(),
                                                      dst_path.c_str());
-                        log::rule_engine::error(msg);
+                        rodsLog(LOG_ERROR, msg.data());
                         addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, ec, msg.data());
                     }
 
@@ -335,7 +333,7 @@ namespace
                     addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
 
                     if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                        log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
+                        rodsLog(LOG_ERROR, "Could not remove hard-link [%s]", input->objPath);
                         return ERROR(ec, "Hard-Link removal error");
                     }
 
@@ -369,7 +367,7 @@ namespace
                         addKeyVal(&unreg_input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
 
                         if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                            log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
+                            rodsLog(LOG_ERROR, "Could not remove hard-link [%s]", input->objPath);
                             return ERROR(ec, "Hard-Link removal error");
                         }
 
@@ -419,7 +417,7 @@ namespace
                 const auto data_object_info = util::get_data_object_info(conn, logical_path);
 
                 if (data_object_info.empty()) {
-                    log::rule_engine::error("Could not gather data object information.");
+                    rodsLog(LOG_ERROR, "Could not gather data object information.");
                     return ERROR(SYS_INTERNAL_ERR, "Could not gather data object information");
                 }
 
@@ -445,8 +443,8 @@ namespace
                     irods::experimental::scoped_privileged_client spc{conn};
 
                     if (const auto ec = rsPhyPathReg(&conn, &input); ec < 0) {
-                        log::rule_engine::error("Could not make hard-link [error code = {}, physical_path = {}, link_name = {}]",
-                                                ec, info.physical_path, link_name);
+                        rodsLog(LOG_ERROR, "Could not make hard-link [error code = %d, physical_path = %s, link_name = %s]",
+                                ec, info.physical_path.data(), link_name.data());
                         return ERROR(ec, "Could not register physical path as a data object");
                     }
                 }
@@ -469,7 +467,7 @@ namespace
                     }
                 }
                 catch (const fs::filesystem_error& e) {
-                    log::rule_engine::error("{} [error code = {}]", e.what(), e.code().value());
+                    rodsLog(LOG_ERROR, "%s [error code = %d]", e.what(), e.code().value());
                     return ERROR(e.code().value(), e.what());
                 }
             }
@@ -540,14 +538,14 @@ namespace
             return (iter->second)(rule_arguments, effect_handler);
         }
 
-        log::rule_engine::error("Rule not supported in rule engine plugin [{}]", rule_name);
+        rodsLog(LOG_ERROR, "[hard_links] Rule not supported in rule engine plugin [rule = %s]", rule_name.data());
 
         return CODE(RULE_ENGINE_CONTINUE);
     }
 
     auto exec_rule_text_impl(std::string_view rule_text, irods::callback effect_handler) -> irods::error
     {
-        log::rule_engine::debug({{"rule_text", std::string{rule_text}}});
+        rodsLog(LOG_DEBUG, "[hard_links] rule_text = %s", rule_text.data());
 
         // irule <text>
         if (rule_text.find("@external rule {") != std::string::npos) {
@@ -560,12 +558,12 @@ namespace
             rule_text = rule_text.substr(start, rule_text.rfind(" }") - start);
         }
 
-        log::rule_engine::debug({{"rule_text", std::string{rule_text}}});
+        rodsLog(LOG_DEBUG, "[hard_links] rule_text = %s", std::string{rule_text}.data());
 
         try {
             const auto json_args = json::parse(rule_text);
 
-            log::rule_engine::debug({{"function", __func__}, {"json_arguments", json_args.dump()}});
+            rodsLog(LOG_DEBUG, "[hard_links] json_arguments = %s", json_args.dump().data());
 
             const auto op = json_args.at("operation").get<std::string>();
 
@@ -582,39 +580,19 @@ namespace
             return ERROR(INVALID_OPERATION, fmt::format("Invalid operation [{}]", op));
         }
         catch (const json::parse_error& e) {
-            // clang-format off
-            log::rule_engine::error({{"rule_engine_plugin", "hard_links"},
-                                     {"rule_engine_plugin_function", __func__},
-                                     {"log_message", e.what()}});
-            // clang-format on
-
+            rodsLog(LOG_ERROR, "[hard_links] error = %s", e.what());
             return ERROR(USER_INPUT_FORMAT_ERR, e.what());
         }
         catch (const json::type_error& e) {
-            // clang-format off
-            log::rule_engine::error({{"rule_engine_plugin", "hard_links"},
-                                     {"rule_engine_plugin_function", __func__},
-                                     {"log_message", e.what()}});
-            // clang-format on
-
+            rodsLog(LOG_ERROR, "[hard_links] error = %s", e.what());
             return ERROR(SYS_INTERNAL_ERR, e.what());
         }
         catch (const std::exception& e) {
-            // clang-format off
-            log::rule_engine::error({{"rule_engine_plugin", "hard_links"},
-                                     {"rule_engine_plugin_function", __func__},
-                                     {"log_message", e.what()}});
-            // clang-format on
-
+            rodsLog(LOG_ERROR, "[hard_links] error = %s", e.what());
             return ERROR(SYS_INTERNAL_ERR, e.what());
         }
         catch (...) {
-            // clang-format off
-            log::rule_engine::error({{"rule_engine_plugin", "hard_links"},
-                                     {"rule_engine_plugin_function", __func__},
-                                     {"log_message", "Unknown error"}});
-            // clang-format on
-
+            rodsLog(LOG_ERROR, "[hard_links] Unknown error");
             return ERROR(SYS_UNKNOWN_ERROR, "Unknown error");
         }
     }
