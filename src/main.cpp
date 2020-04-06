@@ -295,7 +295,7 @@ namespace
                 auto& conn = *util::get_rei(effect_handler).rsComm;
                 const fs::path src_path = input->srcDataObjInp.objPath;
 
-                // If the path is part of a hard-link group, then update the logical path and
+                // If the path is part of a hard link group, then update the logical path and
                 // skip the actual rename operation. Else, do nothing and continue to the next REP.
                 if (util::get_uuid(conn, src_path)) {
                     const fs::path dst_path = input->destDataObjInp.objPath;
@@ -327,7 +327,7 @@ namespace
                 auto& conn = *util::get_rei(effect_handler).rsComm;
 
                 // Unregister the data object.
-                // Hard-links do NOT appear in the trash.
+                // Hard links do NOT appear in the trash.
                 if (const auto uuid = util::get_uuid(conn, input->objPath); uuid && util::get_data_objects(conn, *uuid).size() > 1) {
                     dataObjInp_t unreg_input{};
                     unreg_input.oprType = UNREG_OPR;
@@ -335,8 +335,8 @@ namespace
                     addKeyVal(&unreg_input.condInput, FORCE_FLAG_KW, "");
 
                     if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                        log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
-                        return ERROR(ec, "Hard-Link removal error");
+                        log::rule_engine::error("Could not remove hard link [{}]", input->objPath);
+                        return ERROR(ec, "Hard Link removal error");
                     }
 
                     return CODE(RULE_ENGINE_SKIP_OPERATION);
@@ -369,13 +369,13 @@ namespace
                         addKeyVal(&unreg_input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
 
                         if (const auto ec = rsDataObjUnlink(&conn, &unreg_input); ec < 0) {
-                            log::rule_engine::error("Could not remove hard-link [{}]", input->objPath);
-                            return ERROR(ec, "Hard-Link removal error");
+                            log::rule_engine::error("Could not remove hard link [{}]", input->objPath);
+                            return ERROR(ec, "Hard Link removal error");
                         }
 
                         // If the number of links was two before unregistering the replica, then we
                         // now have one link left (which doesn't make sense). Therefore, the server needs
-                        // to delete the hard-link metadata attached to the data object.
+                        // to delete the hard link metadata attached to the data object.
                         if (links.size() == 2) {
                             for (auto&& l : links) {
                                 fs::server::remove_metadata(conn, l, {"irods::hard_link", *uuid, resource_id});
@@ -406,9 +406,9 @@ namespace
         {
             try {
                 auto args_iter = std::begin(rule_arguments);
-                const auto logical_path = boost::any_cast<std::string>(*args_iter);
-                const auto replica_number = boost::any_cast<int>(*++args_iter);
-                const auto link_name = boost::any_cast<std::string>(*++args_iter);
+                const auto& logical_path = *boost::any_cast<std::string*>(*args_iter);
+                const auto& replica_number = *boost::any_cast<std::string*>(*++args_iter);
+                const auto& link_name = *boost::any_cast<std::string*>(*++args_iter);
 
                 auto& conn = *util::get_rei(effect_handler).rsComm;
 
@@ -425,7 +425,7 @@ namespace
 
                 const auto& info = [&replica_number, &data_object_info] {
                     for (auto&& info : data_object_info) {
-                        if (std::stoi(info.replica_number) == replica_number) {
+                        if (info.replica_number == replica_number) {
                             return info;
                         }
                     }
@@ -437,15 +437,15 @@ namespace
                 {
                     dataObjInp_t input{};
                     addKeyVal(&input.condInput, FILE_PATH_KW, info.physical_path.data());
-                    addKeyVal(&input.condInput, REPL_NUM_KW, std::to_string(replica_number).data());
+                    addKeyVal(&input.condInput, REPL_NUM_KW, replica_number.data());
                     rstrcpy(input.objPath, link_name.data(), MAX_NAME_LEN);
 
                     // Vanilla iRODS only allows administrators to register data objects.
-                    // Elevate privileges so that all users can create hard-links.
+                    // Elevate privileges so that all users can create hard links.
                     irods::experimental::scoped_privileged_client spc{conn};
 
                     if (const auto ec = rsPhyPathReg(&conn, &input); ec < 0) {
-                        log::rule_engine::error("Could not make hard-link [error code = {}, physical_path = {}, link_name = {}]",
+                        log::rule_engine::error("Could not make hard link [error code = {}, physical_path = {}, link_name = {}]",
                                                 ec, info.physical_path, link_name);
                         return ERROR(ec, "Could not register physical path as a data object");
                     }
@@ -454,15 +454,15 @@ namespace
                 const auto [generated_new_uuid, uuid] = util::get_existing_or_generate_uuid(conn, logical_path);
 
                 try {
-                    // Set hard-link metadata on new the data object (the hard-linked data object).
+                    // Set hard link metadata on new the data object (the hard linked data object).
                     fs::server::set_metadata(conn, link_name, {"irods::hard_link", uuid, info.resource_id});
 
-                    // Set hard-link metadata on source data object if the uuid is new.
+                    // Set hard link metadata on source data object if the uuid is new.
                     if (generated_new_uuid) {
                         fs::server::set_metadata(conn, logical_path, {"irods::hard_link", uuid, info.resource_id});
                     }
 
-                    // Copy permissions to the hard-link.
+                    // Copy permissions to the hard link.
                     const auto status = fs::server::status(conn, logical_path);
                     for (auto&& e : status.permissions()) {
                         fs::server::permissions(conn, link_name, e.name, e.prms);
@@ -503,6 +503,7 @@ namespace
     // TODO Could expose these as a new .so. The .so would then be loaded by the new "irods" cli.
     // Then we get things like: irods ln <args>...
     const handler_map_type hard_link_handlers{
+        {"hard_link_create",  handler::make_hard_link},
         {"hard_links_create", handler::make_hard_link}
     };
     // clang-format on
@@ -512,7 +513,9 @@ namespace
 
     auto rule_exists(irods::default_re_ctx&, const std::string& rule_name, bool& exists) -> irods::error
     {
-        exists = pep_handlers.find(rule_name) != std::end(pep_handlers);
+        exists = (pep_handlers.find(rule_name) != std::end(pep_handlers) ||
+                  hard_link_handlers.find(rule_name) != std::end(hard_link_handlers));
+
         return SUCCESS();
     }
 
@@ -537,6 +540,10 @@ namespace
                    irods::callback effect_handler) -> irods::error
     {
         if (auto iter = pep_handlers.find(rule_name); std::end(pep_handlers) != iter) {
+            return (iter->second)(rule_arguments, effect_handler);
+        }
+
+        if (auto iter = hard_link_handlers.find(rule_name); std::end(hard_link_handlers) != iter) {
             return (iter->second)(rule_arguments, effect_handler);
         }
 
@@ -570,11 +577,11 @@ namespace
             const auto op = json_args.at("operation").get<std::string>();
 
             if (const auto iter = hard_link_handlers.find(op); iter != std::end(hard_link_handlers)) {
-                std::list<boost::any> args{
-                    json_args.at("logical_path").get<std::string>(),
-                    json_args.at("replica_number").get<int>(),
-                    json_args.at("link_name").get<std::string>()
-                };
+                auto logical_path = json_args.at("logical_path").get<std::string>();
+                auto replica_number = json_args.at("replica_number").get<std::string>();
+                auto link_name = json_args.at("link_name").get<std::string>();
+
+                std::list<boost::any> args{&logical_path, &replica_number, &link_name};
 
                 return (iter->second)(args, effect_handler);
             }
