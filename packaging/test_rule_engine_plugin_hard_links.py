@@ -46,12 +46,12 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.admin.assert_icommand(['iput', file_path])
             data_object = os.path.join(self.admin.session_collection, data_object)
 
-            # Create two hard-links to the data object previously put into iRODS.
+            # Create two hard links to the data object previously put into iRODS.
             hard_link_a = os.path.join(self.admin.session_collection, 'foo.0')
-            self.make_hard_link(data_object, 0, hard_link_a)
+            self.make_hard_link(data_object, '0', hard_link_a)
 
             hard_link_b = os.path.join(self.admin.session_collection, 'foo.1')
-            self.make_hard_link(data_object, 0, hard_link_b)
+            self.make_hard_link(data_object, '0', hard_link_b)
 
             # Verify that all data objects have the same metadata AVUs.
             # Verify that the physical path is the same for each data object.
@@ -66,7 +66,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                     'units: {0}'.format(resource_id)
                 ])
 
-            # Remove all data objects starting with the hard-links.
+            # Remove all data objects starting with the hard links.
             count = 3
             for path in [hard_link_b, hard_link_a, data_object]:
                 print('HARD LINK COUNT = ' + str(self.hard_link_count(uuid, resource_id)))
@@ -88,12 +88,12 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.admin.assert_icommand(['iput', file_path])
             data_object = os.path.join(self.admin.session_collection, data_object)
 
-            # Create two hard-links to the data object previously put into iRODS.
+            # Create two hard links to the data object previously put into iRODS.
             hard_link_a = os.path.join(self.admin.session_collection, 'foo.0')
-            self.make_hard_link(data_object, 0, hard_link_a)
+            self.make_hard_link(data_object, '0', hard_link_a)
 
             hard_link_b = os.path.join(self.admin.session_collection, 'foo.1')
-            self.make_hard_link(data_object, 0, hard_link_b)
+            self.make_hard_link(data_object, '0', hard_link_b)
 
             # Create new resource.
             vault_name = 'other_resc_vault'
@@ -103,7 +103,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             other_resc = 'otherResc'
             self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault], 'STDOUT', [other_resc])
 
-            # Replicate the hard-link to the new resource.
+            # Replicate the hard link to the new resource.
             self.admin.assert_icommand(['irepl', '-R', other_resc, hard_link_a])
 
             # There should now be two physical copies under iRODS. One under the default resource
@@ -129,7 +129,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.assertFalse(resource_id == other_resource_id)
             self.assertFalse(physical_path == self.get_physical_path(hard_link_a, replica_number=1))
 
-            # Verify the hard-link counts.
+            # Verify the hard link counts.
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 3)
             self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
 
@@ -139,7 +139,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
 
             # Trim the replica that is shared between two logical paths.
-            # This will cause all hard-link metadata to be removed because there are zero replicas
+            # This will cause all hard link metadata to be removed because there are zero replicas
             # being shared between logical paths.
             self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_a], 'STDOUT', ['trimmed'])
             self.assertTrue(self.hard_link_count(uuid, resource_id) == 0)
@@ -170,10 +170,10 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             data_object_physical_path = self.get_physical_path(data_object)
             self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path])
 
-            # Create a hard-link to the data object previously put into iRODS.
+            # Create a hard link to the data object previously put into iRODS.
             # Capture the physical path for verification.
             hard_link = os.path.join(self.admin.session_collection, 'foo.0')
-            self.make_hard_link(data_object, 0, hard_link)
+            self.make_hard_link(data_object, '0', hard_link)
             hard_link_physical_path = self.get_physical_path(data_object)
             self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [hard_link_physical_path])
 
@@ -192,14 +192,14 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [replica_physical_path])
 
             # Rename the original data object and show that only the logical path changed.
-            # Hard-Links never modify the physical path of any data objects.
+            # Hard Links never modify the physical path of any data objects.
             new_name = 'bar'
             self.admin.assert_icommand(['imv', data_object, new_name])
             data_object = new_name
             self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
             self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
 
-            # Rename the hard-link and verify that all data objects point to the same replica.
+            # Rename the hard link and verify that all data objects point to the same replica.
             new_name = 'baz'
             self.admin.assert_icommand(['imv', hard_link, new_name])
             hard_link = new_name
@@ -269,13 +269,13 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.admin.assert_icommand(['ils', '-A', data_object], 'STDOUT', expected_permissions)
             self.user.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
 
-            # Create a hard-link to the data object previously put into iRODS.
+            # Create a hard link to the data object previously put into iRODS.
             # Capture the physical path for verification.
             hard_link = os.path.join(self.admin.session_collection, 'foo.0')
-            self.make_hard_link(data_object, 0, hard_link)
+            self.make_hard_link(data_object, '0', hard_link)
 
             # Simulate the behavior of WinSCP when opening a data object via Vim through NFSRODS.
-            # 1. Rename the hard-link to the data object's name.
+            # 1. Rename the hard link to the data object's name.
             new_name = data_object + '.old'
             self.admin.assert_icommand(['imv', data_object, new_name])
             self.admin.assert_icommand(['imv', hard_link, data_object])
