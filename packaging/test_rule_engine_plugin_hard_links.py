@@ -33,7 +33,107 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
         super(Test_Rule_Engine_Plugin_Hard_Links, self).tearDown()
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
-    def test_irm(self):
+    def test_iphymv(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Put a file: foo
+            data_object = 'foo'
+            file_path = os.path.join(self.admin.local_session_dir, data_object)
+            lib.make_file(file_path, 1024, 'arbitrary')
+            self.admin.assert_icommand(['iput', file_path])
+            data_object = os.path.join(self.admin.session_collection, data_object)
+
+            # Create a hard link to the data object previously put into iRODS.
+            hard_link_a = os.path.join(self.admin.session_collection, 'foo.0')
+            self.make_hard_link(data_object, '0', hard_link_a)
+
+            # Verify that the hard link information is correct.
+            hl_info = self.get_hard_link_info(data_object)[0]
+            for path in [data_object, hard_link_a]:
+                self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
+                self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                    'attribute: irods::hard_link',
+                    'value: {0}'.format(hl_info['uuid']),
+                    'units: {0}'.format(hl_info['resource_id'])
+                ])
+
+            # Create two new resources. This will be used to verify that the correct replica
+            # is being updated following invocation of iphymv.
+            resc_0 = 'resc_0'
+            self.create_resource(resc_0);
+
+            resc_1 = 'resc_1'
+            self.create_resource(resc_1);
+
+            try:
+                # Replicate the data object to the new resource.
+                self.admin.assert_icommand(['irepl', '-R', resc_0, data_object])
+
+                # Create a hard link to the newly created replica.
+                hard_link_b = os.path.join(self.admin.session_collection, 'foo.1')
+                self.make_hard_link(data_object, '1', hard_link_b)
+
+                # Verify that the hard link information is correct.
+                hl_info = self.get_hard_link_info(hard_link_b)[0]
+                for path in [data_object, hard_link_b]:
+                    self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
+                    self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                        'attribute: irods::hard_link',
+                        'value: {0}'.format(hl_info['uuid']),
+                        'units: {0}'.format(hl_info['resource_id'])
+                    ])
+
+                # Capture the current replica information. This will be used to verify that moving
+                # the physical object to a new resource also updates the hard link information
+                # for all data objects in the hard link group.
+                original_resource_id_for_replica_0 = self.get_resource_id(hard_link_a)
+                original_resource_id_for_replica_1 = self.get_resource_id(hard_link_b)
+
+                original_resource_name_for_replica_0 = self.get_resource_name(hard_link_a)
+                original_resource_name_for_replica_1 = self.get_resource_name(hard_link_b)
+
+                # Trigger the real test!
+                self.admin.assert_icommand(['iphymv', '-S', 'demoResc', '-R', resc_1, data_object])
+
+                # Verify that the hard link information was updated correctly.
+                # This includes the following values:
+                # - resource id
+                # - resource name
+                # - physical path
+                # - hard link information
+                resource_id_for_replica_0 = self.get_resource_id(data_object)
+                self.assertTrue(original_resource_id_for_replica_0 != resource_id_for_replica_0)
+                self.assertTrue(original_resource_id_for_replica_0 != self.get_resource_id(hard_link_a))
+                self.assertTrue(original_resource_id_for_replica_1 == self.get_resource_id(hard_link_b))
+
+                resource_name_for_replica_0 = self.get_resource_name(data_object)
+                self.assertTrue(original_resource_name_for_replica_0 != resource_name_for_replica_0)
+                self.assertTrue(original_resource_name_for_replica_0 != self.get_resource_name(hard_link_a))
+                self.assertTrue(original_resource_name_for_replica_1 == self.get_resource_name(hard_link_b))
+
+                # Verify that the hard link information is correct.
+                hl_info = self.get_hard_link_info(hard_link_a)[0]
+                for path in [data_object, hard_link_a]:
+                    self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
+                    self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                        'attribute: irods::hard_link',
+                        'value: {0}'.format(hl_info['uuid']),
+                        'units: {0}'.format(resource_id_for_replica_0)
+                    ])
+
+                for path in [hard_link_b, hard_link_a]:
+                    self.admin.assert_icommand(['irm', '-f', path], 'STDOUT', ['deprecated'])
+
+                self.admin.assert_icommand(['irm', '-f', data_object])
+            finally:
+                self.admin.assert_icommand(['iadmin', 'rmresc', resc_0])
+                self.admin.assert_icommand(['iadmin', 'rmresc', resc_1])
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_irm_with_single_hard_link_on_a_single_data_object(self):
 	config = IrodsConfig()
 
         with lib.file_backed_up(config.server_config_path):
@@ -55,27 +155,27 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
 
             # Verify that all data objects have the same metadata AVUs.
             # Verify that the physical path is the same for each data object.
-            uuid = self.get_uuid(data_object)
-            resource_id = self.get_resource_id(data_object)
-            physical_path = self.get_physical_path(data_object)
+            hl_info = self.get_hard_link_info(data_object)[0]
             for path in [data_object, hard_link_a, hard_link_b]:
-                self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [physical_path])
+                self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
                 self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
                     'attribute: irods::hard_link',
-                    'value: {0}'.format(uuid),
-                    'units: {0}'.format(resource_id)
+                    'value: {0}'.format(hl_info['uuid']),
+                    'units: {0}'.format(hl_info['resource_id'])
                 ])
 
             # Remove all data objects starting with the hard links.
             count = 3
-            for path in [hard_link_b, hard_link_a, data_object]:
-                print('HARD LINK COUNT = ' + str(self.hard_link_count(uuid, resource_id)))
-                self.assertTrue(self.hard_link_count(uuid, resource_id) == count)
-                self.admin.assert_icommand(['irm', '-f', path])
+            for path in [hard_link_b, hard_link_a]:
+                self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == count)
+                self.admin.assert_icommand(['irm', '-f', path], 'STDOUT', ['deprecated'])
                 count -= 1
 
+            self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == 0)
+            self.admin.assert_icommand(['irm', '-f', data_object])
+
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
-    def test_itrim(self):
+    def test_irm_with_multiple_hard_links_on_a_single_data_object(self):
 	config = IrodsConfig()
 
         with lib.file_backed_up(config.server_config_path):
@@ -95,63 +195,132 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             hard_link_b = os.path.join(self.admin.session_collection, 'foo.1')
             self.make_hard_link(data_object, '0', hard_link_b)
 
-            # Create new resource.
-            vault_name = 'other_resc_vault'
-            vault_directory = os.path.join(self.admin.local_session_dir, vault_name)
-            os.mkdir(vault_directory)
-            vault = socket.gethostname() + ':' + vault_directory
-            other_resc = 'otherResc'
-            self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault], 'STDOUT', [other_resc])
-
-            # Replicate the hard link to the new resource.
-            self.admin.assert_icommand(['irepl', '-R', other_resc, hard_link_a])
-
-            # There should now be two physical copies under iRODS. One under the default resource
-            # and another under 'otherResc'. Each logical path shares the same UUID. The replica under
-            # 'otherResc' has a different units value, in this case, 'otherResc'.
-
-            # Verify that all data objects have the same metadata AVUs.
+            # Verify that all data object have the same metadata AVUs.
             # Verify that the physical path is the same for each data object.
-            uuid = self.get_uuid(data_object)
-            resource_id = self.get_resource_id(data_object)
-            physical_path = self.get_physical_path(data_object)
+            hl_info = self.get_hard_link_info(data_object)
             for path in [data_object, hard_link_a, hard_link_b]:
-                self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [physical_path])
+                self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info[0]['physical_path']])
                 self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
                     'attribute: irods::hard_link',
-                    'value: {0}'.format(uuid),
-                    'units: {0}'.format(resource_id)
+                    'value: {0}'.format(hl_info[0]['uuid']),
+                    'units: {0}'.format(hl_info[0]['resource_id'])
                 ])
 
-            # Verify that the replica on 'otherResc' has different metadata.
-            other_resource_id = self.get_resource_id(hard_link_a, replica_number=1)
-            self.assertTrue(uuid == self.get_uuid(hard_link_a, replica_number=1))
-            self.assertFalse(resource_id == other_resource_id)
-            self.assertFalse(physical_path == self.get_physical_path(hard_link_a, replica_number=1))
+            # Create new resource.
+            other_resc = 'otherResc'
+            self.create_resource(other_resc)
 
-            # Verify the hard link counts.
-            self.assertTrue(self.hard_link_count(uuid, resource_id) == 3)
-            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
+            try:
+                # Replicate the data object to the new resource.
+                self.admin.assert_icommand(['irepl', '-R', other_resc, data_object])
 
-            # Trim the replica that is shared between three logical paths.
-            self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_b], 'STDOUT', ['trimmed'])
-            self.assertTrue(self.hard_link_count(uuid, resource_id) == 2)
-            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 1)
+                # Create a third hard link that references the new replica.
+                hard_link_c = os.path.join(self.admin.session_collection, 'bar')
+                self.make_hard_link(data_object, '1', hard_link_c)
 
-            # Trim the replica that is shared between two logical paths.
-            # This will cause all hard link metadata to be removed because there are zero replicas
-            # being shared between logical paths.
-            self.admin.assert_icommand(['itrim', '-N1', '-S', self.admin.default_resource, hard_link_a], 'STDOUT', ['trimmed'])
-            self.assertTrue(self.hard_link_count(uuid, resource_id) == 0)
-            self.assertTrue(self.hard_link_count(uuid, other_resource_id) == 0)
+                # Verify that the new hard link and the original data object represent
+                # proper hard links.
+                other_hl_info = self.get_hard_link_info(hard_link_c)[0]
+                self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [other_hl_info['physical_path']])
+                self.admin.assert_icommand(['imeta', 'ls', '-d', data_object], 'STDOUT', [
+                    'attribute: irods::hard_link',
+                    'value: {0}'.format(other_hl_info['uuid']),
+                    'units: {0}'.format(other_hl_info['resource_id'])
+                ])
 
-            # Verify that the metadata has been removed.
-            for path in [data_object, hard_link_a]:
-                self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', ['None'])
+                # Remove the latest hard link and verify that the original data object
+                # is still part of the hard link group containing the first two hard links.
+                self.admin.assert_icommand(['irm', '-f', hard_link_c], 'STDOUT', ['deprecated'])
 
-            # Clean-up.
-            self.admin.assert_icommand(['irm', '-f', data_object, hard_link_a])
-            self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
+                hl_info = self.get_hard_link_info(data_object)[0]
+                for path in [data_object, hard_link_a, hard_link_b]:
+                    self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
+                    self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                        'attribute: irods::hard_link',
+                        'value: {0}'.format(hl_info['uuid']),
+                        'units: {0}'.format(hl_info['resource_id'])
+                    ])
+
+                # Remove all data objects starting with the hard links.
+                count = 3
+                for path in [hard_link_b, hard_link_a]:
+                    self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == count)
+                    self.admin.assert_icommand(['irm', '-f', path], 'STDOUT', ['deprecated'])
+                    count -= 1
+
+                self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == 0)
+                self.admin.assert_icommand(['irm', '-f', data_object])
+            finally:
+                self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_itrim_with_multiple_hard_links_on_a_single_data_object(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Create two additional resources.
+            # These will be used to create the W-case.
+            resc_0 = 'resc_0'
+            self.create_resource(resc_0)
+
+            resc_1 = 'resc_1'
+            self.create_resource(resc_1)
+
+            try:
+                # Put a file: foo [on demoResc]
+                data_object = 'foo'
+                file_path = os.path.join(self.admin.local_session_dir, data_object)
+                lib.make_file(file_path, 1024, 'arbitrary')
+                self.admin.assert_icommand(['iput', file_path])
+                data_object = os.path.join(self.admin.session_collection, data_object)
+
+                # Replicate the data object to the other resources.
+                for r in [resc_0, resc_1]:
+                    self.admin.assert_icommand(['irepl', '-R', r, data_object])
+
+                # Create hard links to the new replicas.
+                hard_link_a = os.path.join(self.admin.session_collection, 'foo.0')
+                self.make_hard_link(data_object, '1', hard_link_a)
+
+                hard_link_b = os.path.join(self.admin.session_collection, 'foo.1')
+                self.make_hard_link(data_object, '2', hard_link_b)
+
+                self.admin.assert_icommand(['ils', '-L'], 'STDOUT', [' '])
+
+                # Verify the hard link metadata AVUs and physical paths are correct.
+                hl_info_a = self.get_hard_link_info(hard_link_a)[0]
+                hl_info_b = self.get_hard_link_info(hard_link_b)[0]
+                for hl_info in [hl_info_a, hl_info_b]:
+                    self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [hl_info['physical_path']])
+                    self.admin.assert_icommand(['imeta', 'ls', '-d', data_object], 'STDOUT', [
+                        'attribute: irods::hard_link',
+                        'value: {0}'.format(hl_info['uuid']),
+                        'units: {0}'.format(hl_info['resource_id'])
+                    ])
+
+                # There should now be three physical copies under iRODS. One under the
+                # default resourc eand two more under "resc_0" and "resc_1". All replicas
+                # except the one on "demoResc" are hard linked.
+
+                # Trim the replicas down to a count of one. The only replica left should
+                # be the one on "demoResc". This shows that the plugin maintains support
+                # for trimming multiple replicas. In this case, the replicas were unregisterd
+                # instead of being unlinked.
+                self.admin.assert_icommand(['itrim', '-N1', data_object], 'STDOUT', ['trimmed'])
+                self.admin.assert_icommand(['ils', '-L'], 'STDOUT', [' '])
+
+                # Verify that the metadata has been removed.
+                for path in [data_object, hard_link_a, hard_link_b]:
+                    self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', ['None'])
+
+                # Clean-up.
+                for path in [data_object, hard_link_a, hard_link_b]:
+                    self.admin.assert_icommand(['irm', '-f', path])
+            finally:
+                self.admin.assert_icommand(['iadmin', 'rmresc', resc_0])
+                self.admin.assert_icommand(['iadmin', 'rmresc', resc_1])
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
     def test_imv(self):
@@ -171,55 +340,54 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path])
 
             # Create a hard link to the data object previously put into iRODS.
-            # Capture the physical path for verification.
             hard_link = os.path.join(self.admin.session_collection, 'foo.0')
             self.make_hard_link(data_object, '0', hard_link)
+
+            # Capture the physical path of the hard link for verification.
             hard_link_physical_path = self.get_physical_path(data_object)
             self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [hard_link_physical_path])
 
             # Create new resource.
-            vault_name = 'other_resc_vault'
-            vault_directory = os.path.join(self.admin.local_session_dir, vault_name)
-            os.mkdir(vault_directory)
-            vault = socket.gethostname() + ':' + vault_directory
             other_resc = 'otherResc'
-            self.admin.assert_icommand(['iadmin', 'mkresc', other_resc, 'unixfilesystem', vault], 'STDOUT', [other_resc])
+            self.create_resource(other_resc)
 
-            # Replicate the data object to the new resource.
-            # Capture the physical path for verification.
-            self.admin.assert_icommand(['irepl', '-R', other_resc, data_object])
-            replica_physical_path = self.get_physical_path(data_object, replica_number=1)
-            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [replica_physical_path])
+            try:
+                # Replicate the data object to the new resource.
+                # Capture the physical path for verification.
+                self.admin.assert_icommand(['irepl', '-R', other_resc, data_object])
+                replica_physical_path = self.get_physical_path(data_object, replica_number=1)
+                self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [replica_physical_path])
 
-            # Rename the original data object and show that only the logical path changed.
-            # Hard Links never modify the physical path of any data objects.
-            new_name = 'bar'
-            self.admin.assert_icommand(['imv', data_object, new_name])
-            data_object = new_name
-            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
-            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
+                # Rename the original data object and show that only the logical path changed.
+                # Hard Links never modify the physical path of any data objects.
+                new_name = 'bar'
+                self.admin.assert_icommand(['imv', data_object, new_name])
+                data_object = new_name
+                self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
+                self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
 
-            # Rename the hard link and verify that all data objects point to the same replica.
-            new_name = 'baz'
-            self.admin.assert_icommand(['imv', hard_link, new_name])
-            hard_link = new_name
-            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
-            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
+                # Rename the hard link and verify that all data objects point to the same replica.
+                new_name = 'baz'
+                self.admin.assert_icommand(['imv', hard_link, new_name])
+                hard_link = new_name
+                self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
+                self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
 
-            # Move the original data object to a new collection and show that only the logical
-            # paths are updated. The physical paths do not change even when moving data objects to
-            # different collections.
-            collection = 'col.d'
-            self.admin.assert_icommand(['imkdir', collection])
-            new_name = os.path.join(collection, data_object)
-            self.admin.assert_icommand(['imv', data_object, new_name])
-            data_object = new_name
-            self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
-            self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
+                # Move the original data object to a new collection and show that only the logical
+                # paths are updated. The physical paths do not change even when moving data objects to
+                # different collections.
+                collection = 'col.d'
+                self.admin.assert_icommand(['imkdir', collection])
+                new_name = os.path.join(collection, data_object)
+                self.admin.assert_icommand(['imv', data_object, new_name])
+                data_object = new_name
+                self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
+                self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
 
-            # Clean-up.
-            self.admin.assert_icommand(['irm', '-rf', data_object, hard_link])
-            self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
+                # Clean-up.
+                self.admin.assert_icommand(['irm', '-rf', data_object, hard_link])
+            finally:
+                self.admin.assert_icommand(['iadmin', 'rmresc', other_resc])
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
     def test_moving_data_object_without_hard_links_invokes_existing_behavior(self):
@@ -282,7 +450,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             # 2. Remove the original data object.
             hard_link = data_object
             data_object = new_name
-            self.admin.assert_icommand(['irm', '-f', data_object])
+            self.admin.assert_icommand(['irm', '-f', data_object], 'STDOUT', ['deprecated'])
             # 3. Verify that the permissions have been maintained.
             data_object = hard_link
             self.admin.assert_icommand(['ils', '-A', data_object], 'STDOUT', expected_permissions)
@@ -309,29 +477,75 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
     def make_perm_string(self, user, permission):
         return user.username + '#' + user.zone_name + ':' + permission
 
+    def get_hard_link_info(self, data_object):
+        gql = "select META_DATA_ATTR_VALUE, META_DATA_ATTR_UNITS, DATA_REPL_NUM, DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link'"
+        coll_name = os.path.dirname(data_object)
+        data_name = os.path.basename(data_object)
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s,%s,%s,%s', gql.format(coll_name, data_name)])
+
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+
+        rows = []
+        for row in str(utf8_stdout).strip().split('\n'):
+            columns = row.split(',')
+            rows.append({
+                'uuid': columns[0],
+                'resource_id': columns[1],
+                'replica_number': columns[2],
+                'physical_path': columns[3]
+            })
+
+        return rows
+
     def get_uuid(self, data_object, replica_number=0):
         gql = "select META_DATA_ATTR_VALUE where COLL_NAME = '{0}' and DATA_NAME = '{1}' and META_DATA_ATTR_NAME = 'irods::hard_link' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
-        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
-        return str(utf8_query_result_string).strip()
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+        return str(utf8_stdout).strip()
 
     def get_resource_id(self, data_object, replica_number=0):
         gql = "select RESC_ID where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
-        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
-        return str(utf8_query_result_string).strip()
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+        return str(utf8_stdout).strip()
+
+    def get_resource_name(self, data_object, replica_number=0):
+        gql = "select RESC_NAME where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
+        coll_name = os.path.dirname(data_object)
+        data_name = os.path.basename(data_object)
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+        return str(utf8_stdout).strip()
 
     def get_physical_path(self, data_object, replica_number=0):
         gql = "select DATA_PATH where COLL_NAME = '{0}' and DATA_NAME = '{1}' and DATA_REPL_NUM = '{2}'"
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
-        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
-        return str(utf8_query_result_string).strip()
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+        return str(utf8_stdout).strip()
 
     def hard_link_count(self, uuid, resource_id):
         gql = "select COUNT(DATA_NAME) where META_DATA_ATTR_NAME = 'irods::hard_link' and META_DATA_ATTR_VALUE = '{0}' and RESC_ID = '{1}'"
-        utf8_query_result_string, ec, rc = self.admin.run_icommand(['iquest', '%s', gql.format(uuid, resource_id)])
-        return int(str(utf8_query_result_string).strip())
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(uuid, resource_id)])
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+        return int(str(utf8_stdout).strip())
+
+    def create_resource(self, resource_name):
+        vault_name = resource_name + '_vault'
+        vault_directory = os.path.join(self.admin.local_session_dir, vault_name)
+        if not os.path.exists(vault_directory):
+            os.mkdir(vault_directory)
+        vault = socket.gethostname() + ':' + vault_directory
+        self.admin.assert_icommand(['iadmin', 'mkresc', resource_name, 'unixfilesystem', vault], 'STDOUT', [resource_name])
 

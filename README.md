@@ -139,4 +139,3 @@ The following creates a hard link just like in the section above.
 ```bash
 $ irule -r irods_rule_engine_plugin-irods_rule_language-instance 'hard_link_create(*lp, *rn, *ln)' '*lp=/tempZone/home/rods/foo%*rn=0%*ln=/tempZone/home/rods/bar.hl' ruleExecOut
 ```
-
