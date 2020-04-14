@@ -39,7 +39,7 @@ add_library(${PLUGIN} MODULE ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
 set_target_properties(${PLUGIN} PROPERTIES CXX_STANDARD ${IRODS_CXX_STANDARD})
 
-target_compile_options(${PLUGIN} PRIVATE -Wno-write-strings -nostdinc++)
+target_compile_options(${PLUGIN} PRIVATE -nostdinc++ -Wno-write-strings -Wunused)
 
 target_compile_definitions(${PLUGIN} PRIVATE ${IRODS_COMPILE_DEFINITIONS}
                                              RODS_SERVER
