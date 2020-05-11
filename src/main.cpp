@@ -26,6 +26,7 @@
 #include <irods/key_value_proxy.hpp>
 #include <irods/irods_server_api_call.hpp>
 #include <irods/rodsLog.h>
+#include <irods/irods_at_scope_exit.hpp>
 
 #include "boost/filesystem/path.hpp"
 #include "boost/uuid/uuid.hpp"
@@ -521,7 +522,15 @@ namespace
 
                 irods::experimental::key_value_proxy kvp{input->condInput};
 
-                // TODO Add deprecation message for itrim -N (4-2-stable only)!
+                // Deprecation messages must be handled by doing the following.
+                // The native rule engine may erase all messages in the rError array.
+                // The only way to guarantee that messages are received by the client
+                // is to add them to the rError array when the function returns.
+                irods::at_scope_exit at_scope_exit{[&] {
+                    if (kvp.contains(COPIES_KW)) {
+                        addRErrorMsg(&conn.rError, DEPRECATED_PARAMETER, "Specifying a minimum number of replicas to keep is deprecated.");
+                    }
+                }};
 
                 if (kvp.contains(RESC_NAME_KW) && // -S
                     kvp.contains(REPL_NUM_KW))    // -n

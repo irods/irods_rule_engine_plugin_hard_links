@@ -323,6 +323,27 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 self.admin.assert_icommand(['iadmin', 'rmresc', resc_1])
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_itrim_returns_deprecation_message_when_minimum_number_of_replicas_to_keep_is_specified(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Put a file: foo
+            data_object = 'foo'
+            file_path = os.path.join(self.admin.local_session_dir, data_object)
+            lib.make_file(file_path, 1024, 'arbitrary')
+            self.admin.assert_icommand(['iput', file_path])
+            data_object = os.path.join(self.admin.session_collection, data_object)
+
+            # Create a hard link to the data object previously put into iRODS.
+            hard_link_a = os.path.join(self.admin.session_collection, 'foo.0')
+            self.make_hard_link(data_object, '0', hard_link_a)
+
+            # Trigger the deprecation message.
+            self.admin.assert_icommand(['itrim', '-N2', data_object], 'STDOUT', ['Specifying a minimum number of replicas to keep is deprecated.'])
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
     def test_imv(self):
 	config = IrodsConfig()
 
