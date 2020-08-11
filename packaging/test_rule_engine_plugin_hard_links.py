@@ -308,7 +308,8 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 # be the one on "demoResc". This shows that the plugin maintains support
                 # for trimming multiple replicas. In this case, the replicas were unregisterd
                 # instead of being unlinked.
-                self.admin.assert_icommand(['itrim', '-N1', data_object], 'STDOUT', ['trimmed'])
+                self.admin.assert_icommand(['itrim', '-N1', '-n1', data_object], 'STDOUT', ['trimmed'])
+                self.admin.assert_icommand(['itrim', '-N1', '-n2', data_object], 'STDOUT', ['trimmed'])
                 self.admin.assert_icommand(['ils', '-L'], 'STDOUT', [' '])
 
                 # Verify that the metadata has been removed.
@@ -456,6 +457,46 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
             self.admin.assert_icommand(['ils', '-A', data_object], 'STDOUT', expected_permissions)
             self.admin.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
             self.user.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_post_peps_are_triggered_after_manipulating_hard_links(self):
+        config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Put a file into iRODS.
+            data_object = os.path.join(self.admin.session_collection, 'foo')
+            contents = 'Did it work!?'
+            self.admin.assert_icommand(['istream', 'write', data_object], input=contents)
+            self.admin.assert_icommand(['istream', 'read', data_object], 'STDOUT', [contents])
+
+            # Create a hard link to the data object previously put into iRODS.
+            hard_link = os.path.join(self.admin.session_collection, 'foo.0')
+            self.make_hard_link(data_object, '0', hard_link)
+
+            core_re_path = os.path.join(config.core_re_directory, 'core.re')
+
+            with lib.file_backed_up(core_re_path):
+                # The metadata to attach to the data object. Used to determine if the test was successful.
+                key = 'post_pep_attr_name'
+                value = 'IT WORKED!'
+
+                # Add a post PEP that attaches metadata to the original data object.
+                with open(core_re_path, 'a') as core_re:
+                    core_re.write('''
+                        pep_api_data_obj_unlink_post(*INSTANCE_NAME, *COMM, *DATAOBJINP) {{
+                            *kvp.'{key}' = '{value}';
+                            msiSetKeyValuePairsToObj(*kvp, '{data_object}', '-d');
+                        }}
+                    '''.format(**locals()))
+
+                # Trigger the post PEP and verify that a new AVU exists on the data object.
+                self.admin.assert_icommand(['irm', '-f', hard_link])
+                self.admin.assert_icommand(['imeta', 'ls', '-d', data_object], 'STDOUT', [
+                    'attribute: {0}'.format(key),
+                    'value: {0}'.format(value)
+                ])
 
     def enable_hard_links_rule_engine_plugin(self, config):
         config.server_config['plugin_configuration']['rule_engines'].insert(0, {
