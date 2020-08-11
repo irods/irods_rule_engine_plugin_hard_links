@@ -17,6 +17,8 @@
 #include <irods/rsModDataObjMeta.hpp>
 #include <irods/rsDataObjUnlink.hpp>
 #include <irods/rsPhyPathReg.hpp>
+#include <irods/dataObjTrim.h>
+#include <irods/rsDataObjTrim.hpp>
 #include <irods/irods_resource_manager.hpp>
 #include <irods/irods_resource_redirect.hpp>
 #include <irods/scoped_privileged_client.hpp>
@@ -50,6 +52,7 @@ extern irods::resource_manager resc_mgr;
 namespace
 {
     // clang-format off
+    namespace ix = irods::experimental;
     namespace fs = irods::experimental::filesystem;
 
     using log    = irods::experimental::log;
@@ -166,7 +169,7 @@ namespace
 
             // Vanilla iRODS only allows administrators to register data objects.
             // Elevate privileges so that all users can create hard links.
-            irods::experimental::scoped_privileged_client spc{conn};
+            ix::scoped_privileged_client spc{conn};
 
             return rsPhyPathReg(&conn, &input);
         };
@@ -241,7 +244,7 @@ namespace
             input.dataObjInfo = &info;
             input.regParam = &reg_params;
 
-            irods::experimental::scoped_privileged_client spc{conn};
+            ix::scoped_privileged_client spc{conn};
 
             return rsModDataObjMeta(&conn, &input);
         }
@@ -266,7 +269,7 @@ namespace
             input.dataObjInfo = &info;
             input.regParam = &reg_params;
 
-            irods::experimental::scoped_privileged_client spc{conn};
+            ix::scoped_privileged_client spc{conn};
 
             return rsModDataObjMeta(&conn, &input);
         }
@@ -307,31 +310,6 @@ namespace
             return uuid;
         }
 
-        auto resolve_resource_hierarchy(rsComm_t& conn,
-                                        dataObjInp_t& input,
-                                        irods::experimental::key_value_proxy& kvp) -> irods::error
-        {
-            if (!kvp.contains(RESC_HIER_STR_KW)) {
-                // Set the repl keyword so resources can respond accordingly.
-                kvp.insert_or_assign({IN_REPL_KW, ""});
-
-                std::string hier;
-                int local = LOCAL_HOST;
-                rodsServerHost_t* host = nullptr;
-
-                const auto e = irods::resource_redirect(irods::UNLINK_OPERATION, &conn, &input, hier, host, local);
-
-                if (!e.ok()) {
-                    log::rule_engine::error("Could not resolve resource hierarchy [data_object={}]", input.objPath);
-                    return e;
-                }
-
-                kvp.insert_or_assign({DEST_RESC_HIER_STR_KW, hier});
-            }
-
-            return SUCCESS();
-        }
-
         auto replace_hard_link_metadata(rsComm_t& conn,
                                         const fs::path& logical_path,
                                         const hard_link& hard_link,
@@ -352,20 +330,6 @@ namespace
             }
         }
 
-        auto get_access_permission(const rsComm_t& conn, const irods::experimental::key_value_proxy& kvp) -> char*
-        {
-            if (kvp.contains(ADMIN_KW)) {
-                if (!irods::is_privileged_client(conn)) {
-                    THROW(CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "Insufficient privilege level");
-                }
-            }
-            else {
-                return ACCESS_DELETE_OBJECT;
-            }
-
-            return nullptr;
-        }
-
         auto resolve_resource(std::string_view resource_name) -> irods::resource_ptr
         {
             irods::resource_ptr p;
@@ -376,6 +340,179 @@ namespace
             }
 
             return p;
+        }
+
+        auto convert_physical_object_to_dataObjInfo_t(const irods::physical_object& _obj) -> dataObjInfo_t
+        {
+            dataObjInfo_t info{};
+
+            info.dataSize = _obj.size();
+            info.dataId = _obj.id();
+            info.collId = _obj.coll_id();
+            info.replNum = _obj.repl_num();
+            info.replStatus = _obj.replica_status();
+            info.dataMapId = _obj.map_id();
+            info.rescId = _obj.resc_id();
+
+            rstrcpy(info.objPath, _obj.name().c_str(), sizeof(info.objPath));
+            rstrcpy(info.version, _obj.version().c_str(), sizeof(info.version));
+            rstrcpy(info.dataType, _obj.type_name().c_str(), sizeof(info.dataType));
+            rstrcpy(info.rescName, _obj.resc_name().c_str(), sizeof(info.rescName));
+            rstrcpy(info.filePath, _obj.path().c_str(), sizeof(info.filePath));
+            rstrcpy(info.dataOwnerName, _obj.owner_name().c_str(), sizeof(info.dataOwnerName));
+            rstrcpy(info.dataOwnerZone, _obj.owner_zone().c_str(), sizeof(info.dataOwnerZone));
+            rstrcpy(info.statusString, _obj.status().c_str(), sizeof(info.statusString));
+            rstrcpy(info.chksum, _obj.checksum().c_str(), sizeof(info.chksum));
+            rstrcpy(info.dataExpiry, _obj.expiry_ts().c_str(), sizeof(info.dataExpiry));
+            rstrcpy(info.dataMode, _obj.mode().c_str(), sizeof(info.dataMode));
+            rstrcpy(info.dataComments, _obj.r_comment().c_str(), sizeof(info.dataComments));
+            rstrcpy(info.dataCreate, _obj.create_ts().c_str(), sizeof(info.dataCreate));
+            rstrcpy(info.dataModify, _obj.modify_ts().c_str(), sizeof(info.dataModify));
+            rstrcpy(info.rescHier, _obj.resc_hier().c_str(), sizeof(info.rescHier));
+
+            return info;
+        }
+
+        auto get_minimum_age_in_minutes(const ix::key_value_proxy<keyValPair_t>& _kvp) -> std::chrono::minutes
+        {
+            if (const auto iter = _kvp.find(AGE_KW); iter != std::end(_kvp)) {
+                if (const auto v = std::atoi((*iter).value().data()); v > 0) {
+                    return std::chrono::minutes{v};
+                }
+            }
+
+            return std::chrono::minutes{0};;
+        }
+
+        auto get_minimum_replica_count(const ix::key_value_proxy<keyValPair_t>& _kvp) -> std::size_t
+        {
+            if (const auto iter = _kvp.find(COPIES_KW); iter != std::end(_kvp)) {
+                try {
+                    if (const auto value = std::stoull((*iter).value().data()); value > 0) {
+                        return value;
+                    }
+                }
+                catch (...) {}
+            }
+
+            return DEF_MIN_COPY_CNT;
+        }
+
+        auto get_replica_list(rsComm_t& _conn, dataObjInp_t& _input) -> std::vector<irods::physical_object>
+        {
+            ix::key_value_proxy kvp{_input.condInput};
+
+            if (!kvp.contains(RESC_HIER_STR_KW)) {
+                auto result = irods::resolve_resource_hierarchy(irods::UNLINK_OPERATION, &_conn, _input);
+                auto file_obj = std::get<irods::file_object_ptr>(result);
+                return file_obj->replicas();
+            }
+
+            irods::file_object_ptr file_obj{new irods::file_object{}};
+            irods::error fac_err = irods::file_object_factory(&_conn, &_input, file_obj);
+
+            if (!fac_err.ok()) {
+                THROW(fac_err.code(), "file_object_factory failed");
+            }
+
+            return file_obj->replicas();
+        }
+
+        auto get_list_of_replicas_to_trim(dataObjInp_t& _input, const std::vector<irods::physical_object>& _replicas)
+            -> std::vector<irods::physical_object>
+        {
+            std::vector<irods::physical_object> trim_list;
+
+            const auto good_replica_count = std::count_if(std::begin(_replicas), std::end(_replicas), [](const auto& repl) {
+                return (repl.replica_status() & 0x0F) == GOOD_REPLICA;
+            });
+
+            ix::key_value_proxy kvp{_input.condInput};
+            const auto minimum_replica_count = get_minimum_replica_count(kvp);
+
+            using clock_type = std::chrono::system_clock;
+
+            const auto replica_meets_age_requirement =
+                [min_age = util::get_minimum_age_in_minutes(kvp), now = clock_type::now()](std::string_view _timestamp_in_secs)
+                {
+                    const clock_type::time_point last_modified{std::chrono::seconds{std::atoi(_timestamp_in_secs.data())}};
+                    return now - last_modified >= min_age;
+                };
+
+            // If a specific replica number is specified, only trim that one!
+            if (const auto iter = kvp.find(REPL_NUM_KW); iter != std::end(kvp)) {
+                try {
+                    const auto end = std::end(_replicas);
+                    const auto repl = std::find_if(std::begin(_replicas), end,
+                        [n = std::stoi((*iter).value().data())](const auto& _r) {
+                            return n == _r.repl_num();
+                        });
+
+                    if (repl == end) {
+                        THROW(SYS_REPLICA_DOES_NOT_EXIST, "Target replica does not exist");
+                    }
+
+                    if (!replica_meets_age_requirement(repl->modify_ts())) {
+                        THROW(USER_INCOMPATIBLE_PARAMS, "Target replica is not old enough for removal");
+                    }
+
+                    if (good_replica_count <= minimum_replica_count && (repl->replica_status() & 0x0F) == GOOD_REPLICA) {
+                        THROW(USER_INCOMPATIBLE_PARAMS, "Cannot remove the last good replica");
+                    }
+
+                    trim_list.push_back(*repl);
+
+                    return trim_list;
+                }
+                catch (const std::invalid_argument& e) {
+                    log::rule_engine::error(e.what());
+                    THROW(USER_INVALID_REPLICA_INPUT, "Invalid replica number requested");
+                }
+                catch (const std::out_of_range& e) {
+                    log::rule_engine::error(e.what());
+                    THROW(USER_INVALID_REPLICA_INPUT, "Invalid replica number requested");
+                }
+            }
+
+            const auto resc_name = kvp.contains(RESC_NAME_KW) ? kvp[RESC_NAME_KW].value() : "";
+            const auto matches_target_resource = [&resc_name](const irods::physical_object& _obj) {
+                return irods::hierarchy_parser{_obj.resc_hier()}.first_resc() == resc_name;
+            };
+
+            // Walk list and add stale replicas to the list.
+            for (const auto& obj : _replicas) {
+                if ((obj.replica_status() & 0x0F) == STALE_REPLICA) {
+                    if (!replica_meets_age_requirement(obj.modify_ts()) || (!resc_name.empty() && !matches_target_resource(obj))) {
+                        continue;
+                    }
+
+                    trim_list.push_back(obj);
+                }
+            }
+
+            if (good_replica_count <= minimum_replica_count) {
+                return trim_list;
+            }
+
+            // If we have not reached the minimum count, walk list again and add good replicas.
+            std::size_t good_replicas_to_be_trimmed = 0;
+
+            for (const auto& obj : _replicas) {
+                if ((obj.replica_status() & 0x0F) == GOOD_REPLICA) {
+                    if (!replica_meets_age_requirement(obj.modify_ts()) || (!resc_name.empty() && !matches_target_resource(obj))) {
+                        continue;
+                    }
+
+                    if (good_replica_count - good_replicas_to_be_trimmed <= minimum_replica_count) {
+                        return trim_list;
+                    }
+
+                    trim_list.push_back(obj);
+                    ++good_replicas_to_be_trimmed;
+                }
+            }
+
+            return trim_list;
         }
     } // namespace util
 
@@ -519,7 +656,7 @@ namespace
                     return CODE(RULE_ENGINE_CONTINUE);
                 }
 
-                irods::experimental::key_value_proxy kvp{input->condInput};
+                ix::key_value_proxy kvp{input->condInput};
 
                 // TODO Add deprecation message for itrim -N (4-2-stable only)!
 
@@ -534,78 +671,56 @@ namespace
 
                 rodsServerHost_t* rodsServerHost = nullptr;
                 
-                if (const int ec = getAndConnRemoteZone(&conn, input, &rodsServerHost, REMOTE_OPEN); ec < 0) {
+                if (const auto ec = getAndConnRemoteZone(&conn, input, &rodsServerHost, REMOTE_OPEN); ec < 0) {
                     return ERROR(ec, "Redirect error");
                 }
                 else if (ec == REMOTE_HOST) {
-                    const auto ec = irods::server_api_call(DATA_OBJ_TRIM_AN, &conn, input);
+                    const auto ec = rcDataObjTrim(rodsServerHost->conn, input);
                     
-                    if (ec) {
+                    if (ec < 0) {
                         return ERROR(ec, "Redirect error");
                     }
 
                     return CODE(ec);
                 }
 
-                if (const auto e = util::resolve_resource_hierarchy(conn, *input, kvp); !e.ok()) {
-                    return e;
+                int error_code = 0;
+                std::string replica_number;
+
+                // Temporarily remove REPL_NUM_KW to ensure we are returned all replicas in the list.
+                if (kvp.contains(REPL_NUM_KW)) {
+                    replica_number = kvp[REPL_NUM_KW].value().data();
+                    kvp.erase(REPL_NUM_KW);
                 }
 
-                dataObjInfo_t* dataObjInfoHead = nullptr;
+                const auto repl_list = util::get_replica_list(conn, *input);
 
-                if (const auto ec = getDataObjInfo(&conn, input, &dataObjInfoHead, util::get_access_permission(conn, kvp), 1); ec < 0) {
-                    return ERROR(ec, "Could not get data object information");
+                if (!replica_number.empty()) {
+                    kvp[REPL_NUM_KW] = replica_number;
                 }
-
-                if (const auto ec = resolveInfoForTrim(&dataObjInfoHead, &input->condInput); ec < 0) {
-                    return ERROR(ec, "Could not resolve which data objects to trim");
-                }
-
-                std::chrono::minutes minimum_age_in_minutes{0};
-
-                if (const auto iter = kvp.find(AGE_KW); iter != std::end(kvp)) {
-                    const std::string& value = *iter;
-                    minimum_age_in_minutes = std::chrono::minutes{std::atoi(value.data())};
-                }
-
-                const auto replica_meets_age_requirement = [&minimum_age_in_minutes](auto&& timestamp_in_seconds)
-                {
-                    using clock_type = std::chrono::system_clock;
-                    const clock_type::time_point last_modified{std::chrono::seconds{std::atoi(timestamp_in_seconds)}};
-                    return clock_type::now() - last_modified >= minimum_age_in_minutes;
-                };
 
                 const auto is_dry_run = kvp.contains(DRYRUN_KW);
 
-                log::rule_engine::error("Iterating over each replica and checking if it should be trimmed ...");
-
-                for (auto&& info : dataObjInfoHead) {
+                for (auto&& obj : util::get_list_of_replicas_to_trim(*input, repl_list)) {
                     log::rule_engine::debug("Replica to trim [data_object={}, replica_number={}, physical_path={}]",
-                                            input->objPath, info.replNum, info.filePath);
+                                            input->objPath, obj.repl_num(), obj.path());
 
                     if (is_dry_run) {
                         log::rule_engine::debug("This is a dry run. Skipping ...");
+                        error_code = 1;
                         continue;
                     }
-
-                    if (!replica_meets_age_requirement(info.dataModify)) {
-                        log::rule_engine::debug("Replica does not meet the minimum age requirement. Skipping ...");
-                        continue;
-                    }
-
-                    const auto resource_id = std::to_string(info.rescId);
 
                     log::rule_engine::debug("Checking if replica is hard linked ...");
 
-                    if (const auto object = util::find_hard_link(hl_info, resource_id); object) {
+                    if (const auto object = util::find_hard_link(hl_info, std::to_string(obj.resc_id())); object) {
                         const hard_link& hl = object.value();
 
-                        log::rule_engine::debug("Hard link info [UUID={}, resource_id={}]", hl.uuid, hl.resource_id);
-                        log::rule_engine::debug("Unregistering replica ...");
+                        log::rule_engine::debug("Unregistering replica. [UUID={}, resource_id={}]", hl.uuid, hl.resource_id);
 
-                        if (const auto ec = util::unregister_replica(conn, input->objPath, std::to_string(info.replNum)); ec < 0) {
+                        if (const auto ec = util::unregister_replica(conn, input->objPath, std::to_string(obj.repl_num())); ec < 0) {
                             log::rule_engine::error("Could not unregister replica [data_object={}, replica_number={}]",
-                                                    input->objPath, info.replNum);
+                                                    input->objPath, obj.repl_num());
                             return ERROR(ec, "Could not unregister replica");
                         }
 
@@ -627,26 +742,32 @@ namespace
                         catch (const fs::filesystem_error& e) {
                             log::rule_engine::error("Could not remove hard link metadata "
                                                     "[error_code={}, error_message={}, data_object={}, replica_number={}, UUID={}, resource_id={}]",
-                                                    e.code().value(), e.what(), input->objPath, info.replNum, hl.uuid, hl.resource_id);
+                                                    e.code().value(), e.what(), input->objPath, obj.repl_num(), hl.uuid, hl.resource_id);
                             return ERROR(e.code().value(), e.what());
                         }
                     }
                     else {
                         log::rule_engine::debug("Unlinking replica ...");
 
+                        auto dobj_info = util::convert_physical_object_to_dataObjInfo_t(obj);
+
                         // The replica is not part of a hard link group, so delete it.
-                        // The else-block is not making sense to me. It is basically saying that if the
-                        // first replica is successfully deleted, remember that success code and do not allow
-                        // any failures to be returned back to the client.
-                        if (const auto ec = dataObjUnlinkS(&conn, input, &info); ec < 0) {
+                        // The else-block is not making sense to me. It is basically saying that if the first
+                        // replica is successfully deleted, remember that success code and do not allow any failures
+                        // to be returned back to the client.
+                        if (const auto ec = dataObjUnlinkS(&conn, input, &dobj_info); ec < 0) {
                             log::rule_engine::error("Could not unlink replica [error_code={}, data_object={}, replica_number={}]",
-                                                    ec, input->objPath, info.replNum);
-                            return ERROR(ec, "Could not unlink replica");
+                                                    ec, input->objPath, dobj_info.replNum);
+
+                            if (error_code == 0) {
+                                error_code = ec;
+                            }
+                        }
+                        else {
+                            error_code = 1;
                         }
                     }
                 }
-
-                freeAllDataObjInfo(dataObjInfoHead);
 
                 return CODE(RULE_ENGINE_SKIP_OPERATION);
             }
@@ -661,7 +782,7 @@ namespace
             return CODE(RULE_ENGINE_CONTINUE);
         }
 
-        static auto pep_api_data_obj_phymv_post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
+        auto pep_api_data_obj_phymv_post(std::list<boost::any>& rule_arguments, irods::callback& effect_handler) -> irods::error
         {
             try {
                 auto* input = util::get_input_object_ptr<dataObjInp_t>(rule_arguments);
@@ -673,14 +794,14 @@ namespace
 
                 const auto hl_info = util::get_hard_links(conn, input->objPath);
 
-                irods::experimental::key_value_proxy kvp{input->condInput};
+                ix::key_value_proxy kvp{input->condInput};
 
-                auto src_resc = util::resolve_resource(static_cast<const std::string&>(kvp.at(RESC_NAME_KW)));
+                auto src_resc = util::resolve_resource(kvp.at(RESC_NAME_KW).value());
                 rodsLong_t src_resc_id;
                 src_resc->get_property(irods::RESOURCE_ID, src_resc_id);
                 log::rule_engine::debug("Source resource id = {}", src_resc_id);
 
-                auto dst_resc = util::resolve_resource(static_cast<const std::string&>(kvp.at(DEST_RESC_NAME_KW)));
+                auto dst_resc = util::resolve_resource(kvp.at(DEST_RESC_NAME_KW).value());
                 rodsLong_t dst_resc_id;
                 dst_resc->get_property(irods::RESOURCE_ID, dst_resc_id);
                 log::rule_engine::debug("Destination resource id = {}", dst_resc_id);
