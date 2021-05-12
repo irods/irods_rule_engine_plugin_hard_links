@@ -96,7 +96,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 original_resource_name_for_replica_1 = self.get_resource_name(hard_link_b)
 
                 # Trigger the real test!
-                self.admin.assert_icommand(['iphymv', '-S', 'demoResc', '-R', resc_1, data_object])
+                self.admin.assert_icommand(['iphymv', '-S', resc_0, '-R', resc_1, data_object])
 
                 # Verify that the hard link information was updated correctly.
                 # This includes the following values:
@@ -104,24 +104,24 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 # - resource name
                 # - physical path
                 # - hard link information
-                resource_id_for_replica_0 = self.get_resource_id(data_object)
-                self.assertTrue(original_resource_id_for_replica_0 != resource_id_for_replica_0)
-                self.assertTrue(original_resource_id_for_replica_0 != self.get_resource_id(hard_link_a))
-                self.assertTrue(original_resource_id_for_replica_1 == self.get_resource_id(hard_link_b))
+                resource_id_for_replica_1 = self.get_resource_id(data_object, 1)
+                self.assertTrue(original_resource_id_for_replica_1 != resource_id_for_replica_1)
+                self.assertTrue(original_resource_id_for_replica_1 != self.get_resource_id(hard_link_b))
+                self.assertTrue(original_resource_id_for_replica_0 == self.get_resource_id(hard_link_a))
 
-                resource_name_for_replica_0 = self.get_resource_name(data_object)
-                self.assertTrue(original_resource_name_for_replica_0 != resource_name_for_replica_0)
-                self.assertTrue(original_resource_name_for_replica_0 != self.get_resource_name(hard_link_a))
-                self.assertTrue(original_resource_name_for_replica_1 == self.get_resource_name(hard_link_b))
+                resource_name_for_replica_1 = self.get_resource_name(data_object, 1)
+                self.assertTrue(original_resource_name_for_replica_1 != resource_name_for_replica_1)
+                self.assertTrue(original_resource_name_for_replica_1 != self.get_resource_name(hard_link_b))
+                self.assertTrue(original_resource_name_for_replica_0 == self.get_resource_name(hard_link_a))
 
                 # Verify that the hard link information is correct.
-                hl_info = self.get_hard_link_info(hard_link_a)[0]
-                for path in [data_object, hard_link_a]:
+                hl_info = self.get_hard_link_info(hard_link_b)[0]
+                for path in [data_object, hard_link_b]:
                     self.admin.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
                     self.admin.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
                         'attribute: irods::hard_link',
                         'value: {0}'.format(hl_info['uuid']),
-                        'units: {0}'.format(resource_id_for_replica_0)
+                        'units: {0}'.format(resource_id_for_replica_1)
                     ])
 
                 for path in [hard_link_b, hard_link_a]:
