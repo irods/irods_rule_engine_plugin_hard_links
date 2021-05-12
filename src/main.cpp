@@ -171,7 +171,29 @@ namespace
             // Elevate privileges so that all users can create hard links.
             ix::scoped_privileged_client spc{conn};
 
-            return rsPhyPathReg(&conn, &input);
+            const auto ec = rsPhyPathReg(&conn, &input);
+
+            // Update the parent collection's mtime.
+            if (ec >= 0) {
+                const auto* local_zone = getLocalZoneName();
+
+                if (const auto zone = fs::zone_name(link_name.data()); zone && *zone == local_zone) {
+                    try {
+                        using std::chrono::system_clock;
+                        using std::chrono::time_point_cast;
+
+                        const auto now = time_point_cast<fs::object_time_type::duration>(system_clock::now());
+
+                        fs::server::last_write_time(conn, fs::path{link_name.data()}.parent_path(), now);
+                    }
+                    catch (const fs::filesystem_error& e) {
+                        rodsLog(LOG_ERROR, "Could not update the collection's mtime. [error_code=%d, collection=%s]",
+                                e.code().value(), e.path1().c_str());
+                    }
+                }
+            }
+
+            return ec;
         };
 
         auto unregister_replica(rsComm_t& conn,
@@ -526,6 +548,48 @@ namespace
 
             return trim_list;
         }
+
+        auto update_collection_mtime(rsComm_t& _conn,
+                                     const fs::path& _path1,
+                                     const std::optional<fs::path> _path2 = std::nullopt) -> void
+        {
+            try {
+                // Update the mtime of the source and destination collections if the paths reference
+                // collections in the local zone.
+
+                using std::chrono::system_clock;
+                using std::chrono::time_point_cast;
+
+                const auto now = time_point_cast<fs::object_time_type::duration>(system_clock::now());
+
+                ix::scoped_privileged_client spc{_conn};
+
+                const auto* local_zone = getLocalZoneName();
+
+                if (const auto zone = fs::zone_name(_path1); zone && *zone == local_zone) {
+                    if (fs::server::is_collection_registered(_conn, _path1)) {
+                        fs::server::last_write_time(_conn, _path1, now);
+                    }
+                }
+
+                if (_path2 && _path1 != *_path2) {
+                    if (const auto zone = fs::zone_name(*_path2); zone && *zone == local_zone) {
+                        if (fs::server::is_collection_registered(_conn, *_path2)) {
+                            fs::server::last_write_time(_conn, *_path2, now);
+                        }
+                    }
+                }
+            }
+            catch (const fs::filesystem_error& e) {
+                if (_path2) {
+                    rodsLog(LOG_ERROR, "Could not update mtime of one or more collections. [path_1=%s, path_2=%s]",
+                            _path1.c_str(), _path2->c_str());
+                }
+                else {
+                    rodsLog(LOG_ERROR, "Could not update mtime of one or more collections. [path=%s]", _path1.c_str());
+                }
+            }
+        }
     } // namespace util
 
     //
@@ -554,6 +618,8 @@ namespace
                         rodsLog(LOG_ERROR, msg.data());
                         addRErrorMsg(&util::get_rei(effect_handler).rsComm->rError, ec, msg.data());
                     }
+
+                    util::update_collection_mtime(conn, src_path.parent_path(), fs::path{input->destDataObjInp.objPath}.parent_path());
 
                     return CODE(RULE_ENGINE_SKIP_OPERATION);
                 }
@@ -643,6 +709,8 @@ namespace
                         }
                     }
                 }
+
+                util::update_collection_mtime(conn, fs::path{input->objPath}.parent_path());
 
                 return CODE(RULE_ENGINE_SKIP_OPERATION);
             }
