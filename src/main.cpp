@@ -259,8 +259,16 @@ namespace
             dataObjInfo_t info{};
             rstrcpy(info.objPath, logical_path.c_str(), MAX_NAME_LEN);
 
+            try {
+                info.replNum = std::stoi(replica_number.data());
+            }
+            catch (...) {
+                rodsLog(LOG_ERROR, "Could not convert replica number string to integer [path=%s, replica_number=%s]",
+                        logical_path.c_str(), replica_number.data());
+                return SYS_INTERNAL_ERR;
+            }
+
             keyValPair_t reg_params{};
-            addKeyVal(&reg_params, REPL_NUM_KW, replica_number.data());
             addKeyVal(&reg_params, RESC_ID_KW, new_resource_id.data());
             addKeyVal(&reg_params, RESC_NAME_KW, new_resource_name.data());
             addKeyVal(&reg_params, FILE_PATH_KW, new_physical_path.c_str());
