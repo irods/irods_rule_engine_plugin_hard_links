@@ -33,6 +33,41 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
         super(Test_Rule_Engine_Plugin_Hard_Links, self).tearDown()
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_creating_a_hard_link_updates_the_mtime_of_the_parent_collection__issue_17(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Create a new data object.
+            data_object = os.path.join(self.user.session_collection, 'foo')
+            self.user.assert_icommand(['istream', 'write', data_object], input='the data')
+
+            # Capture the current mtime of the parent collection.
+            old_mtime = self.get_collection_mtime(self.user.session_collection)
+
+            # Create a hard link.
+            hard_link = os.path.join(self.user.session_collection, 'foo.0')
+            self.make_hard_link(data_object, '0', hard_link, self.user)
+
+            # Verify that the hard link information is correct.
+            hl_info = self.get_hard_link_info(data_object)[0]
+            for path in [data_object, hard_link]:
+                self.user.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
+                self.user.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                    'attribute: irods::hard_link',
+                    'value: {0}'.format(hl_info['uuid']),
+                    'units: {0}'.format(hl_info['resource_id'])
+                ])
+
+            # Show that the mtime has changed.
+            self.assertNotEqual(old_mtime, self.get_collection_mtime(self.user.session_collection))
+
+            # Clean up.
+            self.user.assert_icommand(['irm', '-f', hard_link], 'STDOUT', ['deprecated'])
+            self.user.assert_icommand(['irm', '-f', data_object])
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
     def test_rodsuser_can_remove_hard_linked_replica__issue_28(self):
 	config = IrodsConfig()
 
@@ -198,10 +233,15 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 ])
 
             # Remove all data objects starting with the hard links.
+            # Verify that the parent collection's mtime is being updated to reflect a
+            # change in the collection's contents.
             count = 3
             for path in [hard_link_b, hard_link_a]:
                 self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == count)
+                collection = os.path.dirname(path)
+                old_mtime = self.get_collection_mtime(collection)
                 self.admin.assert_icommand(['irm', '-f', path], 'STDOUT', ['deprecated'])
+                self.assertNotEqual(old_mtime, self.get_collection_mtime(collection))
                 count -= 1
 
             self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == 0)
@@ -413,6 +453,12 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 replica_physical_path = self.get_physical_path(data_object, replica_number=1)
                 self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [replica_physical_path])
 
+                # Capture the mtime of the parent collection.
+                # This will be used to show that renaming a data object causes the mtime of parent
+                # collection to be updated.
+                parent_collection = os.path.dirname(data_object)
+                old_mtime = self.get_collection_mtime(parent_collection)
+
                 # Rename the original data object and show that only the logical path changed.
                 # Hard Links never modify the physical path of any data objects.
                 new_name = 'bar'
@@ -420,6 +466,10 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 data_object = new_name
                 self.admin.assert_icommand(['ils', '-L', data_object], 'STDOUT', [data_object_physical_path, replica_physical_path])
                 self.admin.assert_icommand(['ils', '-L', hard_link], 'STDOUT', [data_object_physical_path])
+
+                # Show that the mtime of the parent collection has been updated.
+                new_mtime = self.get_collection_mtime(parent_collection)
+                self.assertNotEqual(old_mtime, new_mtime)
 
                 # Rename the hard link and verify that all data objects point to the same replica.
                 new_name = 'baz'
@@ -626,6 +676,13 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
         coll_name = os.path.dirname(data_object)
         data_name = os.path.basename(data_object)
         utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(coll_name, data_name, replica_number)])
+        self.assertTrue(0 == len(stderr))
+        self.assertTrue(0 == ec)
+        return str(utf8_stdout).strip()
+
+    def get_collection_mtime(self, collection):
+        gql = "select COLL_MODIFY_TIME where COLL_NAME = '{0}'"
+        utf8_stdout, stderr, ec = self.admin.run_icommand(['iquest', '%s', gql.format(collection)])
         self.assertTrue(0 == len(stderr))
         self.assertTrue(0 == ec)
         return str(utf8_stdout).strip()
