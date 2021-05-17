@@ -187,6 +187,10 @@ namespace
                 addKeyVal(&unreg_input.condInput, REPL_NUM_KW, replica_number->data());
             }
 
+            // Vanilla iRODS only allows administrators to register data objects.
+            // Elevate privileges so that all users can create hard links.
+            ix::scoped_privileged_client spc{conn};
+
             return rsDataObjUnlink(&conn, &unreg_input);
         }
 

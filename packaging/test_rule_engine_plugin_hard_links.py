@@ -33,6 +33,39 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
         super(Test_Rule_Engine_Plugin_Hard_Links, self).tearDown()
 
     @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
+    def test_rodsuser_can_remove_hard_linked_replica__issue_28(self):
+	config = IrodsConfig()
+
+        with lib.file_backed_up(config.server_config_path):
+            self.enable_hard_links_rule_engine_plugin(config)
+
+            # Create a new data object.
+            data_object = os.path.join(self.user.session_collection, 'foo')
+            self.user.assert_icommand(['istream', 'write', data_object], input='the data')
+
+            # Create a hard link.
+            hard_link = os.path.join(self.user.session_collection, 'foo.0')
+            self.make_hard_link(data_object, '0', hard_link, self.user)
+
+            # Verify that the hard link information is correct.
+            hl_info = self.get_hard_link_info(data_object)[0]
+            for path in [data_object, hard_link]:
+                self.user.assert_icommand(['ils', '-L', path], 'STDOUT', [hl_info['physical_path']])
+                self.user.assert_icommand(['imeta', 'ls', '-d', path], 'STDOUT', [
+                    'attribute: irods::hard_link',
+                    'value: {0}'.format(hl_info['uuid']),
+                    'units: {0}'.format(hl_info['resource_id'])
+                ])
+
+            # Remove the hard link and show that the hard link metadata has been removed
+            # from the original data object as well.
+            self.user.assert_icommand(['irm', '-f', hard_link], 'STDOUT', ['deprecated'])
+            self.user.assert_icommand(['imeta', 'ls', '-d', data_object], 'STDOUT', ['None'])
+
+            # Remove the original data object.
+            self.user.assert_icommand(['irm', '-f', data_object])
+
+    @unittest.skipIf(test.settings.RUN_IN_TOPOLOGY, "Skip for Topology Testing")
     def test_iphymv(self):
 	config = IrodsConfig()
 
@@ -506,14 +539,15 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
         })
         lib.update_json_file_from_dict(config.server_config_path, config.server_config)
 
-    def make_hard_link(self, logical_path, replica_number, link_name):
+    def make_hard_link(self, logical_path, replica_number, link_name, session=None):
         hard_link_op = json.dumps({
             'operation': 'hard_links_create',
             'logical_path': logical_path,
             'replica_number': replica_number,
             'link_name': link_name
         })
-        self.admin.assert_icommand(['irule', '-r', 'irods_rule_engine_plugin-hard_links-instance', hard_link_op, 'null', 'ruleExecOut'])
+        session = self.admin if session == None else session
+        session.assert_icommand(['irule', '-r', 'irods_rule_engine_plugin-hard_links-instance', hard_link_op, 'null', 'ruleExecOut'])
 
     def make_perm_string(self, user, permission):
         return user.username + '#' + user.zone_name + ':' + permission
