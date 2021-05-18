@@ -610,6 +610,11 @@ namespace
                 if (!util::get_hard_links(conn, src_path).empty()) {
                     const fs::path dst_path = input->destDataObjInp.objPath;
 
+                    // Do nothing if the paths are identical.
+                    if (src_path == dst_path) {
+                        return CODE(RULE_ENGINE_SKIP_OPERATION);
+                    }
+
                     if (const auto ec = util::set_logical_path(conn, src_path, dst_path); ec < 0) {
                         const auto msg = fmt::format("Could not update logical path. Use iadmin modrepl to update the "
                                                      "data object. [from={}, to={}]",
