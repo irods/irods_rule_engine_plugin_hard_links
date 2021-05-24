@@ -45,6 +45,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
 
             # Capture the current mtime of the parent collection.
             old_mtime = self.get_collection_mtime(self.user.session_collection)
+            sleep(1)
 
             # Create a hard link.
             hard_link = os.path.join(self.user.session_collection, 'foo.0')
@@ -240,6 +241,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 self.assertTrue(self.hard_link_count(hl_info['uuid'], hl_info['resource_id']) == count)
                 collection = os.path.dirname(path)
                 old_mtime = self.get_collection_mtime(collection)
+                sleep(1)
                 self.admin.assert_icommand(['irm', '-f', path], 'STDOUT', ['deprecated'])
                 self.assertNotEqual(old_mtime, self.get_collection_mtime(collection))
                 count -= 1
@@ -437,6 +439,7 @@ class Test_Rule_Engine_Plugin_Hard_Links(session.make_sessions_mixin(admins, use
                 # collection to be updated.
                 parent_collection = os.path.dirname(data_object)
                 old_mtime = self.get_collection_mtime(parent_collection)
+                sleep(1)
 
                 # Rename the original data object and show that only the logical path changed.
                 # Hard Links never modify the physical path of any data objects.
