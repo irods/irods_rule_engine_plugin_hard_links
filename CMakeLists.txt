@@ -6,7 +6,7 @@ set(IRODS_PLUGIN_VERSION "${IRODS_VERSION}.${IRODS_PLUGIN_REVISION}")
 
 set(PLUGIN irods_rule_engine_plugin-hard_links)
 
-set(CMAKE_CXX_COMPILER ${IRODS_EXTERNALS_FULLPATH_CLANG}/bin/clang++)
+include(IrodsCXXCompiler)
 set(CMAKE_CXX_STANDARD ${IRODS_CXX_STANDARD})
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "-Wl,--enable-new-dtags -Wl,--as-needed -Wl,-z,defs")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "-Wl,--enable-new-dtags -Wl,--as-needed -Wl,-z,defs")
@@ -33,6 +33,10 @@ endif()
 
 include(GNUInstallDirs)
 include(UseLibCXX)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fpermissive>)
+endif()
 
 add_library(${PLUGIN} MODULE ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
