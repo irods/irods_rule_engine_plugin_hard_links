@@ -34,7 +34,7 @@
 #include "boost/uuid/uuid_generators.hpp"
 #include "boost/uuid/uuid_io.hpp"
 #include "fmt/format.h"
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 
 #include <exception>
 #include <stdexcept>
