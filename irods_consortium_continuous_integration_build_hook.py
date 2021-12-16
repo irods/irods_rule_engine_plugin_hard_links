@@ -19,7 +19,7 @@ def install_building_dependencies(externals_directory):
                       'irods-externals-clang-runtime6.0-0',
                       'irods-externals-clang6.0-0',
                       'irods-externals-fmt6.1.2-1',
-                      'irods-externals-json3.7.3-0',
+                      'irods-externals-json3.10.4-0',
                       'irods-externals-libarchive3.3.2-1']
 
     if externals_directory == 'None' or externals_directory is None:
