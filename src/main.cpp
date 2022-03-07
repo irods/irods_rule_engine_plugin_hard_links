@@ -327,7 +327,7 @@ namespace
         {
             auto uuid = to_string(boost::uuids::random_generator{}());
 
-            const auto* query = "select DATA_NAME "
+            constexpr auto* query = "select DATA_NAME "
                                 "where"
                                 " META_DATA_ATTR_NAME = 'irods::hard_link' and"
                                 " META_DATA_ATTR_VALUE = '{}' and"
